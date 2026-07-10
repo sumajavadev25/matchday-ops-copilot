@@ -75,6 +75,15 @@
       <span id="engine" class="muted" aria-live="polite"></span>
     </div>
 
+    <section aria-labelledby="map-h">
+      <h2 id="map-h">Stadium map</h2>
+      <p class="muted" style="margin-top:0">Zones around the pitch, coloured by risk. Hover or focus a marker for detail.</p>
+      <svg id="stadium-map" viewBox="0 -18 800 496" role="img"
+           aria-label="Schematic stadium map of zones coloured by risk level"
+           style="width:100%;height:auto;max-height:60vh"></svg>
+      <div id="map-legend" style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:.5rem;font-size:.82rem"></div>
+    </section>
+
     <section aria-labelledby="zones-h">
       <h2 id="zones-h">Live zone occupancy</h2>
       <table>
@@ -126,6 +135,7 @@
       // of truth, so the table can't disagree with the copilot's recommendations.
       const r = await fetch("/api/triage");
       const { zones, incidents } = await r.json();
+      renderMap(zones);
       renderIncidents(incidents || []);
       const body = $("#zones-body");
       body.innerHTML = "";
@@ -139,6 +149,65 @@
                 <span style="width:${Math.min(d*100,100)}%"></span></div> ${pct(d)}</td>
           <td><span class="pill r-${z.risk}">${z.risk}</span></td>`;
         body.appendChild(tr);
+      }
+    }
+
+    const RISK_COLORS = { normal: "#37c978", elevated: "#f2c744", high: "#ff9838", critical: "#ff5470" };
+    const SVGNS = "http://www.w3.org/2000/svg";
+    const svgEl = (tag, attrs) => {
+      const el = document.createElementNS(SVGNS, tag);
+      for (const k in attrs) el.setAttribute(k, attrs[k]);
+      return el;
+    };
+
+    function renderMap(zones) {
+      const svg = $("#stadium-map");
+      svg.innerHTML = "";
+      const W = 800, H = 460, cx = W / 2, cy = H / 2, rx = 300, ry = 170;
+
+      // Stands ring + pitch.
+      svg.appendChild(svgEl("ellipse", { cx, cy, rx: rx + 34, ry: ry + 34, fill: "var(--line)", opacity: .5 }));
+      svg.appendChild(svgEl("ellipse", { cx, cy, rx, ry, fill: "#1f7a44", stroke: "#2b3650", "stroke-width": 2 }));
+      svg.appendChild(svgEl("line", { x1: cx, y1: cy - ry, x2: cx, y2: cy + ry, stroke: "#ffffff", opacity: .5 }));
+      svg.appendChild(svgEl("circle", { cx, cy, r: 34, fill: "none", stroke: "#ffffff", opacity: .5 }));
+
+      if (!zones.length) return;
+      // Place each zone evenly around the perimeter — works for any dataset size.
+      zones.forEach((z, i) => {
+        const ang = (i / zones.length) * 2 * Math.PI - Math.PI / 2;
+        const px = cx + Math.cos(ang) * (rx + 34);
+        const py = cy + Math.sin(ang) * (ry + 34);
+        const color = RISK_COLORS[z.risk] || RISK_COLORS.normal;
+        const g = svgEl("g", { tabindex: "0", role: "img",
+          "aria-label": `${z.name}: ${Math.round(z.density * 100)}% full, ${z.risk} risk` });
+        g.appendChild(svgEl("title", {})).textContent =
+          `${z.name} — ${z.occupancy}/${z.capacity} (${Math.round(z.density * 100)}%), ${z.risk}`;
+        const c = svgEl("circle", { cx: px, cy: py, r: z.risk === "critical" ? 17 : 13,
+          fill: color, stroke: "#0f1420", "stroke-width": 2 });
+        if (z.risk === "critical") {
+          const pulse = svgEl("circle", { cx: px, cy: py, r: 17, fill: "none", stroke: color, "stroke-width": 2, opacity: .6 });
+          const anim = svgEl("animate", { attributeName: "r", values: "17;26;17", dur: "1.6s", repeatCount: "indefinite" });
+          const anim2 = svgEl("animate", { attributeName: "opacity", values: ".6;0;.6", dur: "1.6s", repeatCount: "indefinite" });
+          pulse.appendChild(anim); pulse.appendChild(anim2); g.appendChild(pulse);
+        }
+        g.appendChild(c);
+        const label = svgEl("text", { x: px, y: py - 22, "text-anchor": "middle",
+          fill: "var(--ink)", "font-size": "12", "font-weight": "600" });
+        label.textContent = z.name;
+        const pctText = svgEl("text", { x: px, y: py + 4, "text-anchor": "middle",
+          fill: "#0f1420", "font-size": "10", "font-weight": "700" });
+        pctText.textContent = Math.round(z.density * 100) + "%";
+        svg.appendChild(g); g.appendChild(label); g.appendChild(pctText);
+      });
+
+      // Legend.
+      const legend = $("#map-legend");
+      legend.innerHTML = "";
+      for (const [risk, color] of Object.entries(RISK_COLORS)) {
+        const item = document.createElement("span");
+        item.style.cssText = "display:inline-flex;align-items:center;gap:.35rem";
+        item.innerHTML = `<span style="width:12px;height:12px;border-radius:50%;background:${color};display:inline-block"></span>${risk}`;
+        legend.appendChild(item);
       }
     }
 
