@@ -1,9 +1,43 @@
-# LinkedIn post — drafts (pick one, personalize, post)
+# LinkedIn post — drafts
 
-> Fill the [BRACKETS], attach a screenshot or screen-recording of the live app
-> (the recommendations with es/fr announcements is the money shot), and post.
-> Best engagement window for Indian dev audience: ~9–11am or 7–9pm IST.
-> Tag the organizers if allowed (Google for Developers / Hack2Skill).
+> ⚠️ POST THIS NEAR THE DEADLINE, not now — an early public post leaks the
+>    approach to other participants (9-day window) for zero scoring benefit.
+> ⚠️ The GitHub repo is PRIVATE. Only include the code link if you make it
+>    public at submission time (and only if the contest needs judges to see code).
+> 📸 Attach a screenshot / short screen-recording of the live app — the stadium
+>    map + the recommendation with Spanish/French announcements is the money shot.
+> ⏰ Best engagement window (India dev audience): ~9–11am or 7–9pm IST.
+> 🏷️ Tag Google for Developers / Hack2Skill if the rules allow.
+
+---
+
+## ⭐ FINAL — polished, ready to post (recommended)
+
+Most "stadium app" hackathon entries end up being a map with a chatbot bolted on. I wanted mine to make a **decision** instead.
+
+For PromptWars Virtual Challenge 4, I built **MatchDay Ops Copilot** — real-time, explainable decision support for a FIFA World Cup 2026 stadium control room. I picked one persona (venue ops staff) and went deep on crowd management + operational intelligence, instead of trying to solve all four personas at once.
+
+The scenario it handles: a gate hits 98% capacity *and* has an active medical incident. It doesn't just flash a number. Gemini reasons over the situation and tells staff exactly what to do — hold intake, open a responder lane, redirect to Gate D — *and why* — plus a calm public-address message in English, Spanish and French.
+
+As a backend developer, the split that mattered to me:
+→ **I designed** the deterministic parts — triage rules, relief-zone routing, data ingestion, tests. Cheap, fast, fully testable.
+→ **Gemini did what rules can't** — fusing "98% + medical incident" into a safety judgment, and writing tone-aware announcements in three languages. Delete the model and you lose the reasoning and the comms, not just a nice-to-have.
+
+But the part I'm actually proud of isn't the prompt — it's the reliability. In testing, Gemini's free tier threw me a retired-model 404 and overload 429/503s that silently dropped the app to a non-AI fallback. Unacceptable when the AI is the point. So I added: a `-latest` model alias so a pinned model can't retire mid-contest, retries with jittered backoff, and automatic failover to a lighter model. It now serves real multilingual reasoning even under load.
+
+Tools: **Gemini** (`flash` — cost-optimized on purpose; the challenge rewards engineering, not the biggest model), **FastAPI**, **Docker**, **pytest** (46 tests, edge-case heavy). I also used structured-output mode + few-shot examples to lock the tone.
+
+"Vibe coding" got me moving fast. Thinking like an engineer — tests, cost, graceful degradation — is what made it production-ready.
+
+🔗 Live demo: https://matchday-ops-copilot.onrender.com
+
+— Suma
+
+#PromptWars #BuildWithAI #GoogleAI #Gemini #GenAI #FIFAWorldCup2026 #BackendEngineering #SoftwareEngineering
+
+---
+
+### Alternate drafts below (if you want shorter or more detailed)
 
 ---
 
