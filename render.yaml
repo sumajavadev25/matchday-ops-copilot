@@ -1,0 +1,14 @@
+# Render.com blueprint — free tier, no credit card required.
+# Deploy: push this repo to GitHub, then New > Blueprint on render.com and pick it.
+# Set GEMINI_API_KEY in the Render dashboard (Environment) — never commit the key.
+services:
+  - type: web
+    name: matchday-ops
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false            # set manually in dashboard, not stored in repo
+      - key: GEMINI_MODEL
+        value: gemini-flash-latest

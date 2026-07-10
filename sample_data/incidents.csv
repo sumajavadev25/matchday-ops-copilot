@@ -1,0 +1,4 @@
+id,type,zone_id,severity,description,resolved
+inc-a,security,gate-1,3,Bag-check backup,false
+inc-b,medical,east-concourse,4,Fan needs medical attention,false
+inc-c,facility,gate-2,1,Signage down,true

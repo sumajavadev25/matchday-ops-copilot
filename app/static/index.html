@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MatchDay Ops Copilot — Control Room</title>
+  <style>
+    :root {
+      --bg: #0f1420; --panel: #1a2233; --ink: #eaf0fb; --muted: #9fb0cc;
+      --line: #2b3650; --accent: #4f8cff; --focus: #ffd166;
+      --normal: #37c978; --elevated: #f2c744; --high: #ff9838; --critical: #ff5470;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f5f7fc; --panel: #ffffff; --ink: #16203a; --muted: #4a5878;
+        --line: #dde4f2; --accent: #2f6bff;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+           background: var(--bg); color: var(--ink); }
+    a.skip { position: absolute; left: -999px; top: 0; background: var(--accent);
+             color: #fff; padding: .6rem 1rem; z-index: 10; }
+    a.skip:focus { left: .5rem; }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--line);
+             display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; }
+    header h1 { font-size: 1.15rem; margin: 0; }
+    header .sub { color: var(--muted); font-size: .85rem; }
+    main { max-width: 1000px; margin: 0 auto; padding: 1.25rem; }
+    .bar { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
+    button { font: inherit; font-weight: 600; cursor: pointer; border: 1px solid var(--line);
+             background: var(--accent); color: #fff; border-radius: 8px; padding: .6rem 1rem; }
+    button.secondary { background: var(--panel); color: var(--ink); }
+    button:focus-visible, [tabindex]:focus-visible, summary:focus-visible {
+      outline: 3px solid var(--focus); outline-offset: 2px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+              padding: 1rem 1.15rem; margin-bottom: 1.25rem; }
+    h2 { font-size: 1rem; margin: 0 0 .75rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: .5rem .5rem; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }
+    .meter { height: 10px; background: var(--line); border-radius: 6px; overflow: hidden; min-width: 120px; }
+    .meter > span { display: block; height: 100%; background: var(--accent); }
+    .pill { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .78rem;
+            font-weight: 700; color: #06122b; }
+    .pill.r-normal { background: var(--normal); } .pill.r-elevated { background: var(--elevated); }
+    .pill.r-high { background: var(--high); } .pill.r-critical { background: var(--critical); color: #fff; }
+    .rec { border: 1px solid var(--line); border-left: 5px solid var(--accent);
+           border-radius: 10px; padding: .85rem 1rem; margin-bottom: .85rem; }
+    .rec.r-critical { border-left-color: var(--critical); }
+    .rec.r-high { border-left-color: var(--high); }
+    .rec.r-elevated { border-left-color: var(--elevated); }
+    .rec h3 { margin: 0 0 .35rem; font-size: 1rem; }
+    .rec dt { color: var(--muted); font-size: .78rem; text-transform: uppercase; margin-top: .5rem; }
+    .rec dd { margin: .1rem 0 0; }
+    .ann { display: grid; gap: .35rem; margin-top: .4rem; }
+    .ann code { background: var(--bg); padding: .35rem .5rem; border-radius: 6px; display: block; }
+    .muted { color: var(--muted); }
+    input[type=file] { color: var(--ink); }
+    .status { min-height: 1.2rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to main content</a>
+  <header>
+    <h1>MatchDay Ops Copilot</h1>
+    <span class="sub">FIFA World Cup 2026 · Stadium control room · explainable decision support</span>
+  </header>
+
+  <main id="main">
+    <div class="bar">
+      <button id="analyze" type="button">Run analysis</button>
+      <button id="refresh" type="button" class="secondary">Reload snapshot</button>
+      <button id="reset" type="button" class="secondary">Reset to demo data</button>
+      <span id="engine" class="muted" aria-live="polite"></span>
+    </div>
+
+    <section aria-labelledby="zones-h">
+      <h2 id="zones-h">Live zone occupancy</h2>
+      <table>
+        <caption class="muted" style="text-align:left; margin-bottom:.5rem">
+          Current occupancy per zone. Density is occupancy divided by capacity.
+        </caption>
+        <thead>
+          <tr><th scope="col">Zone</th><th scope="col">Occupancy</th>
+              <th scope="col">Density</th><th scope="col">Level</th></tr>
+        </thead>
+        <tbody id="zones-body"></tbody>
+      </table>
+    </section>
+
+    <section aria-labelledby="inc-h">
+      <h2 id="inc-h">Active incidents</h2>
+      <ul id="incidents" aria-live="polite" style="list-style:none;padding:0;margin:0;display:grid;gap:.5rem"></ul>
+    </section>
+
+    <section aria-labelledby="recs-h">
+      <h2 id="recs-h">Copilot recommendations</h2>
+      <p id="summary" class="status" role="status" aria-live="polite">
+        Press “Run analysis” to generate recommendations.
+      </p>
+      <div id="recs"></div>
+    </section>
+
+    <section aria-labelledby="upload-h">
+      <h2 id="upload-h">Upload real data</h2>
+      <p class="muted">Replace the demo snapshot with a real zones CSV
+        (<code>id,name,capacity,occupancy[,lat,lng]</code>) and an optional incidents CSV.</p>
+      <form id="upload-form">
+        <p><label for="zones-file">Zones CSV (required)</label><br>
+           <input id="zones-file" name="zones" type="file" accept=".csv" required></p>
+        <p><label for="incidents-file">Incidents CSV (optional)</label><br>
+           <input id="incidents-file" name="incidents" type="file" accept=".csv"></p>
+        <button type="submit">Upload &amp; analyze</button>
+      </form>
+      <p id="upload-status" class="status" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script>
+    const $ = (s) => document.querySelector(s);
+    const pct = (d) => Math.round(d * 100) + "%";
+
+    async function loadSnapshot() {
+      // /api/triage gives incident-aware risk from the backend's single source
+      // of truth, so the table can't disagree with the copilot's recommendations.
+      const r = await fetch("/api/triage");
+      const { zones, incidents } = await r.json();
+      renderIncidents(incidents || []);
+      const body = $("#zones-body");
+      body.innerHTML = "";
+      for (const z of zones) {
+        const d = z.density;
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <th scope="row">${esc(z.name)}</th>
+          <td>${z.occupancy.toLocaleString()} / ${z.capacity.toLocaleString()}</td>
+          <td><div class="meter" role="img" aria-label="${pct(d)} full">
+                <span style="width:${Math.min(d*100,100)}%"></span></div> ${pct(d)}</td>
+          <td><span class="pill r-${z.risk}">${z.risk}</span></td>`;
+        body.appendChild(tr);
+      }
+    }
+
+    function renderIncidents(incidents) {
+      const ul = $("#incidents");
+      ul.innerHTML = "";
+      if (!incidents.length) {
+        ul.innerHTML = '<li class="muted">No active incidents.</li>';
+        return;
+      }
+      const sevLevel = (s) => s >= 4 ? "critical" : s === 3 ? "high" : "elevated";
+      for (const i of incidents) {
+        const li = document.createElement("li");
+        li.className = "rec r-" + sevLevel(i.severity);
+        li.style.margin = "0";
+        li.innerHTML =
+          `<strong>${esc(i.type)}</strong> · ${esc(i.zone)} ` +
+          `<span class="pill r-${sevLevel(i.severity)}">sev ${i.severity}</span>` +
+          (i.description ? `<div class="muted">${esc(i.description)}</div>` : "");
+        ul.appendChild(li);
+      }
+    }
+
+    async function analyze() {
+      $("#summary").textContent = "Analyzing…";
+      const r = await fetch("/api/analyze", { method: "POST" });
+      const rep = await r.json();
+      $("#engine").textContent = "Engine: " + rep.generated_by;
+      $("#summary").textContent = rep.summary || "No recommendations.";
+      const box = $("#recs");
+      box.innerHTML = "";
+      for (const rec of rep.recommendations) {
+        const div = document.createElement("div");
+        div.className = "rec r-" + rec.risk;
+        const anns = Object.entries(rec.announcements || {})
+          .map(([k, v]) => `<code><strong>${k}:</strong> ${esc(v)}</code>`).join("");
+        div.innerHTML = `
+          <h3>${esc(rec.headline)} <span class="pill r-${rec.risk}">${rec.risk}</span></h3>
+          <dl>
+            <dt>Why</dt><dd>${esc(rec.reasoning)}</dd>
+            <dt>Action</dt><dd>${esc(rec.action)}</dd>
+            ${anns ? `<dt>Announcements</dt><dd class="ann">${anns}</dd>` : ""}
+          </dl>`;
+        box.appendChild(div);
+      }
+    }
+
+    function esc(s) { const p = document.createElement("p"); p.textContent = s ?? ""; return p.innerHTML; }
+
+    $("#analyze").addEventListener("click", analyze);
+    $("#refresh").addEventListener("click", loadSnapshot);
+    $("#reset").addEventListener("click", async () => {
+      await fetch("/api/reset", { method: "POST" });
+      await loadSnapshot();
+      $("#upload-status").textContent = "Snapshot reset to demo data.";
+    });
+    $("#upload-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      if (!fd.get("incidents")?.size) fd.delete("incidents");
+      $("#upload-status").textContent = "Uploading…";
+      const r = await fetch("/api/upload", { method: "POST", body: fd });
+      const out = await r.json();
+      if (!r.ok) { $("#upload-status").textContent = "Error: " + (out.error || r.status); return; }
+      $("#upload-status").textContent =
+        `Loaded ${out.zones_loaded} zones, ${out.incidents_loaded} incidents.` +
+        (out.errors?.length ? ` ${out.errors.length} row error(s).` : "");
+      await loadSnapshot();
+      await analyze();
+    });
+
+    loadSnapshot();
+    fetch("/api/health").then(r => r.json()).then(h => {
+      $("#engine").textContent = h.genai_enabled ? "GenAI: " + h.model : "GenAI: not configured (fallback mode)";
+    });
+  </script>
+</body>
+</html>

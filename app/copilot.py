@@ -1,0 +1,245 @@
+"""The decision-support core.
+
+Two layers, deliberately separated:
+
+1. Deterministic triage (`assess_zone`) — cheap, O(zones + incidents), fully
+   unit-testable. Decides *which* zones need attention and how urgently.
+2. Generative reasoning (`generate_reasoning`) — Gemini turns the triage into a
+   plain-language explanation and ready-to-broadcast multilingual announcements.
+   This is the part that genuinely needs generation, not rules.
+
+If no API key is configured the report still builds via a transparent fallback
+(marked `generated_by="fallback"`) so the app never hard-fails in dev or tests.
+GenAI is the intended production path and is required at evaluation time.
+"""
+from __future__ import annotations
+
+import json
+
+from .config import settings
+from .models import (
+    CopilotReport,
+    Incident,
+    Recommendation,
+    RiskLevel,
+    StadiumSnapshot,
+    Zone,
+)
+
+# Languages the announcements are generated in. FIFA WC 2026 is USA/Canada/Mexico.
+_DEFAULT_LANGS = ["en", "es", "fr"]
+
+# Retry policy for transient Gemini overload (503). Backoff in seconds, with
+# jitter so concurrent requests don't retry in lockstep under load.
+_MAX_RETRIES = 4
+_RETRY_BACKOFF = 1.5
+
+
+def assess_zone(zone: Zone, incidents: list[Incident], threshold: float) -> RiskLevel:
+    """Rule-based triage for a single zone. Deterministic and side-effect free."""
+    density = zone.density
+    open_incidents = [i for i in incidents if i.zone_id == zone.id and not i.resolved]
+    max_sev = max((i.severity for i in open_incidents), default=0)
+
+    # A high-severity incident escalates regardless of crowd level.
+    if max_sev >= 4 or density >= 1.0:
+        return RiskLevel.CRITICAL
+    if density >= threshold or max_sev == 3:
+        return RiskLevel.HIGH
+    if density >= threshold * 0.85 or max_sev in (1, 2):
+        return RiskLevel.ELEVATED
+    return RiskLevel.NORMAL
+
+
+def _suggest_relief_zone(zone: Zone, snapshot: StadiumSnapshot) -> Zone | None:
+    """Least-crowded zone to redirect flow toward. O(zones), single pass."""
+    best: Zone | None = None
+    for candidate in snapshot.zones:
+        if candidate.id == zone.id:
+            continue
+        if best is None or candidate.density < best.density:
+            best = candidate
+    return best
+
+
+def zone_risks(snapshot: StadiumSnapshot,
+               threshold: float | None = None) -> list[tuple[Zone, RiskLevel]]:
+    """Risk for every zone (including normal ones). Single source of truth for
+    the dashboard table so it can't drift from the copilot's triage."""
+    threshold = settings.crowd_alert_threshold if threshold is None else threshold
+    return [(z, assess_zone(z, snapshot.incidents, threshold)) for z in snapshot.zones]
+
+
+def triage(snapshot: StadiumSnapshot, threshold: float) -> list[tuple[Zone, RiskLevel]]:
+    """All zones needing attention (ELEVATED+), most severe first."""
+    order = {RiskLevel.CRITICAL: 0, RiskLevel.HIGH: 1, RiskLevel.ELEVATED: 2, RiskLevel.NORMAL: 3}
+    scored = [(z, assess_zone(z, snapshot.incidents, threshold)) for z in snapshot.zones]
+    flagged = [(z, r) for z, r in scored if r != RiskLevel.NORMAL]
+    flagged.sort(key=lambda pair: (order[pair[1]], -pair[0].density))
+    return flagged
+
+
+def _fallback_recommendation(zone: Zone, risk: RiskLevel, relief: Zone | None) -> Recommendation:
+    pct = round(zone.density * 100)
+    where = f" Redirect arriving fans to {relief.name}." if relief else ""
+    action = f"Hold intake at {zone.name}.{where}"
+    msg = f"{zone.name} is busy. Please follow steward directions" + (
+        f" toward {relief.name}." if relief else "."
+    )
+    return Recommendation(
+        zone_id=zone.id,
+        zone_name=zone.name,
+        risk=risk,
+        density=round(zone.density, 3),
+        headline=f"{zone.name} at {pct}% capacity",
+        reasoning=(
+            f"{zone.name} is at {pct}% of its {zone.capacity:,} capacity, "
+            f"triaged as {risk.value}. Acting now prevents a bottleneck."
+        ),
+        action=action,
+        announcements={"en": msg},
+    )
+
+
+def _build_prompt(items: list[tuple[Zone, RiskLevel, Zone | None]],
+                  snapshot: StadiumSnapshot, langs: list[str]) -> str:
+    payload = []
+    for zone, risk, relief in items:
+        open_inc = [i.model_dump() for i in snapshot.incidents
+                    if i.zone_id == zone.id and not i.resolved]
+        payload.append({
+            "zone_id": zone.id,
+            "zone_name": zone.name,
+            "risk": risk.value,
+            "density_pct": round(zone.density * 100),
+            "capacity": zone.capacity,
+            "occupancy": zone.occupancy,
+            "open_incidents": open_inc,
+            "suggested_relief_zone": relief.name if relief else None,
+        })
+    return (
+        "You are the operations copilot in a FIFA World Cup 2026 stadium control room. "
+        "For each flagged zone below, produce an explainable recommendation for venue "
+        "staff. Be specific and operational; every recommendation MUST justify itself.\n\n"
+        f"Flagged zones (JSON):\n{json.dumps(payload, indent=2)}\n\n"
+        "Announcement register — match tone to the situation, do not use one flat "
+        "voice:\n"
+        "  - medical or security incident: calm, authoritative, reassuring; lead with "
+        "safety, avoid alarming words like 'emergency' or 'danger'.\n"
+        "  - crowd/capacity only: brisk and directive, emphasise the faster alternative.\n"
+        "  - facility/comfort issue: light, matter-of-fact, not urgent.\n"
+        "Keep each announcement to one or two sentences a nervous, non-local fan can "
+        "act on immediately.\n\n"
+        "Return ONLY a JSON array. Each element:\n"
+        "{\n"
+        '  "zone_id": string,\n'
+        '  "headline": short status line,\n'
+        '  "reasoning": 1-2 sentences on WHY this is a risk and why the action helps,\n'
+        '  "action": concrete instruction for staff,\n'
+        f'  "announcements": object with keys {langs} — the public-address message in\n'
+        "     each language, in the register selected above.\n"
+        "}\n"
+        "No markdown, no commentary outside the JSON array."
+    )
+
+
+def _parse_model_json(raw: str) -> list[dict]:
+    """Tolerate ```json fences and leading/trailing prose around the array."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("```", 2)[1]
+        if text.startswith("json"):
+            text = text[4:]
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1:
+        raise ValueError("no JSON array in model output")
+    return json.loads(text[start:end + 1])
+
+
+def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
+                       snapshot: StadiumSnapshot,
+                       langs: list[str]) -> dict[str, dict]:
+    """Call Gemini for explanations + announcements. Returns {zone_id: fields}.
+
+    Resilience, in order: for each model in the chain (primary, then a lighter
+    fallback), retry transient 5xx overloads with jittered backoff; on 429
+    rate-limit or a retired/invalid model, move straight to the next model.
+    Only if the whole chain fails does the caller fall back to non-AI output.
+    This keeps GenAI functional under the load we actually saw in testing.
+    """
+    import random
+    import time
+
+    from google import genai
+    from google.genai import errors
+
+    client = genai.Client(api_key=settings.gemini_api_key)
+    prompt = _build_prompt(items, snapshot, langs)
+
+    models = [settings.gemini_model]
+    if settings.gemini_fallback_model and settings.gemini_fallback_model not in models:
+        models.append(settings.gemini_fallback_model)
+
+    last_exc: Exception | None = None
+    for model in models:
+        for attempt in range(_MAX_RETRIES):
+            try:
+                resp = client.models.generate_content(model=model, contents=prompt)
+                parsed = _parse_model_json(resp.text)
+                return {row["zone_id"]: row for row in parsed if "zone_id" in row}
+            except errors.ServerError as exc:  # 5xx overload — retry this model
+                last_exc = exc
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_RETRY_BACKOFF * (2 ** attempt) * (0.5 + random.random()))
+            except errors.ClientError as exc:  # 429/404 etc. — try the next model
+                last_exc = exc
+                break
+    raise last_exc if last_exc else RuntimeError("gemini call failed")
+
+
+def build_report(snapshot: StadiumSnapshot,
+                 threshold: float | None = None,
+                 langs: list[str] | None = None) -> CopilotReport:
+    """Full pipeline: triage → (Gemini reasoning | fallback) → assembled report."""
+    threshold = settings.crowd_alert_threshold if threshold is None else threshold
+    langs = langs or _DEFAULT_LANGS
+
+    flagged = triage(snapshot, threshold)
+    items = [(z, r, _suggest_relief_zone(z, snapshot)) for z, r in flagged]
+
+    if not items:
+        return CopilotReport(generated_by="none", threshold=threshold,
+                             summary="All zones nominal. No action required.")
+
+    generated_by = "fallback"
+    reasoning_by_zone: dict[str, dict] = {}
+    if settings.genai_enabled:
+        try:
+            reasoning_by_zone = generate_reasoning(items, snapshot, langs)
+            generated_by = "gemini"
+        except Exception:
+            # Never let a model hiccup take down the control room.
+            generated_by = "fallback"
+
+    recs: list[Recommendation] = []
+    for zone, risk, relief in items:
+        gen = reasoning_by_zone.get(zone.id)
+        if gen:
+            recs.append(Recommendation(
+                zone_id=zone.id,
+                zone_name=zone.name,
+                risk=risk,
+                density=round(zone.density, 3),
+                headline=gen.get("headline", f"{zone.name} needs attention"),
+                reasoning=gen.get("reasoning", ""),
+                action=gen.get("action", ""),
+                announcements={k: v for k, v in gen.get("announcements", {}).items() if v},
+            ))
+        else:
+            recs.append(_fallback_recommendation(zone, risk, relief))
+
+    critical = sum(1 for _, r, _ in items if r == RiskLevel.CRITICAL)
+    summary = (f"{len(items)} zone(s) flagged, {critical} critical. "
+               "Prioritise critical zones first.")
+    return CopilotReport(generated_by=generated_by, threshold=threshold,
+                         recommendations=recs, summary=summary)

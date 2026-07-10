@@ -1,0 +1,7 @@
+id,name,capacity,occupancy,lat,lng
+gate-1,Gate 1,6000,5850,40.813,-74.074
+gate-2,Gate 2,6000,3200,40.812,-74.076
+gate-3,Gate 3,6000,5990,40.814,-74.077
+gate-4,Gate 4,6000,900,40.815,-74.075
+east-concourse,East Concourse,10000,7100,40.816,-74.073
+west-concourse,West Concourse,10000,2400,40.811,-74.078
