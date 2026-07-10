@@ -154,7 +154,7 @@ def test_generate_reasoning_falls_over_to_second_model(monkeypatch):
         text = '[{"zone_id": "a", "headline": "h", "reasoning": "r", "action": "x"}]'
 
     class FakeModels:
-        def generate_content(self, *, model, contents):
+        def generate_content(self, *, model, contents, config=None):
             seen.append(model)
             if model == "primary":
                 raise errors.ClientError(429, {"error": {"message": "quota"}})
@@ -171,3 +171,42 @@ def test_generate_reasoning_falls_over_to_second_model(monkeypatch):
     out = copilot.generate_reasoning([(snap.zones[0], RiskLevel.CRITICAL, None)], snap, ["en"])
     assert seen == ["primary", "backup"]  # tried primary, then fell over
     assert out["a"]["reasoning"] == "r"
+
+
+def test_generate_reasoning_parses_structured_output(monkeypatch):
+    # Simulate the SDK's structured-output path: resp.parsed holds objects,
+    # announcements arrive as a list and must fold into a {lang: text} dict.
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+
+    class Rec:
+        def model_dump(self):
+            return {"zone_id": "a", "headline": "h", "reasoning": "r", "action": "x",
+                    "announcements": [{"lang": "en", "text": "hi"},
+                                      {"lang": "es", "text": "hola"}]}
+
+    class FakeResp:
+        parsed = [Rec()]
+        text = "unused when parsed is present"
+
+    class FakeModels:
+        def generate_content(self, *, model, contents, config=None):
+            return FakeResp()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.models = FakeModels()
+
+    import google.genai as genai_mod
+    monkeypatch.setattr(genai_mod, "Client", FakeClient)
+
+    snap = StadiumSnapshot(zones=[z(1000, id="a")])
+    out = copilot.generate_reasoning(
+        [(snap.zones[0], RiskLevel.CRITICAL, None)], snap, ["en", "es"])
+    assert out["a"]["announcements"] == {"en": "hi", "es": "hola"}
+
+
+def test_prompt_includes_few_shot_examples():
+    snap = StadiumSnapshot(zones=[z(1000, id="a")])
+    prompt = copilot._build_prompt([(snap.zones[0], RiskLevel.CRITICAL, None)], snap, ["en"])
+    assert "Examples of the expected voice" in prompt
+    assert "never" in prompt.lower() and "emergency" in prompt.lower()

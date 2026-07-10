@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 
+from pydantic import BaseModel
+
 from .config import settings
 from .models import (
     CopilotReport,
@@ -33,6 +35,24 @@ _DEFAULT_LANGS = ["en", "es", "fr"]
 # jitter so concurrent requests don't retry in lockstep under load.
 _MAX_RETRIES = 4
 _RETRY_BACKOFF = 1.5
+
+
+# --- Structured output schema -------------------------------------------------
+# Passed to Gemini as `response_schema` so the model returns schema-valid JSON.
+# announcements is a list (not a dict) because structured output needs fixed
+# fields, not arbitrary language keys; we fold it back to {lang: text} on the way
+# out. This lets us drop the fragile fence-stripping text parser as the primary.
+class _GenAnnouncement(BaseModel):
+    lang: str
+    text: str
+
+
+class _GenRecommendation(BaseModel):
+    zone_id: str
+    headline: str
+    reasoning: str
+    action: str
+    announcements: list[_GenAnnouncement]
 
 
 def assess_zone(zone: Zone, incidents: list[Incident], threshold: float) -> RiskLevel:
@@ -130,21 +150,36 @@ def _build_prompt(items: list[tuple[Zone, RiskLevel, Zone | None]],
         "  - facility/comfort issue: light, matter-of-fact, not urgent.\n"
         "Keep each announcement to one or two sentences a nervous, non-local fan can "
         "act on immediately.\n\n"
-        "Return ONLY a JSON array. Each element:\n"
-        "{\n"
-        '  "zone_id": string,\n'
-        '  "headline": short status line,\n'
-        '  "reasoning": 1-2 sentences on WHY this is a risk and why the action helps,\n'
-        '  "action": concrete instruction for staff,\n'
-        f'  "announcements": object with keys {langs} — the public-address message in\n'
-        "     each language, in the register selected above.\n"
-        "}\n"
-        "No markdown, no commentary outside the JSON array."
+        + _FEW_SHOT
+        + f"\nProduce one recommendation per flagged zone. Every 'reasoning' must say "
+        "WHY it is a risk and why the action helps. Include an announcement for each "
+        f"of these languages: {langs}."
     )
 
 
+# One worked example per register (medical vs. facility) to lock tone. Kept
+# compact; the response schema handles structure so we only teach *voice* here.
+_FEW_SHOT = (
+    "Examples of the expected voice:\n"
+    "1) Zone at 97% with a severity-4 medical incident, relief zone 'Gate 8' →\n"
+    '   reasoning: "At 97% with an active medical incident, the crowd is blocking '
+    'responders; holding intake and diverting to Gate 8 clears access and prevents a '
+    'crush." action: "Hold Gate 7 intake, open a responder lane, redirect arrivals to '
+    'Gate 8 with stewards." announcement (en): "For your safety, please continue to '
+    'Gate 8 for entry while our team assists a supporter." (calm, safety-first, never '
+    'says \'emergency\').\n'
+    "2) Zone at 70% with a restroom-overflow facility incident →\n"
+    '   announcement (en): "The restrooms here are busy right now — additional '
+    'facilities are a short walk toward Gate D." (light, matter-of-fact, not urgent).\n\n'
+)
+
+
 def _parse_model_json(raw: str) -> list[dict]:
-    """Tolerate ```json fences and leading/trailing prose around the array."""
+    """Tolerate ```json fences and leading/trailing prose around the array.
+
+    Only a safety net now that structured output is requested — but kept so a
+    model or SDK that ignores the schema still parses.
+    """
     text = raw.strip()
     if text.startswith("```"):
         text = text.split("```", 2)[1]
@@ -154,6 +189,30 @@ def _parse_model_json(raw: str) -> list[dict]:
     if start == -1 or end == -1:
         raise ValueError("no JSON array in model output")
     return json.loads(text[start:end + 1])
+
+
+def _rows_from_response(resp) -> dict[str, dict]:
+    """Normalise a model response into {zone_id: fields}, folding the
+    announcements list back into a {lang: text} dict. Prefers the SDK's parsed
+    structured output; falls back to lenient text parsing."""
+    parsed = getattr(resp, "parsed", None)
+    if parsed:
+        rows = [p.model_dump() if hasattr(p, "model_dump") else dict(p) for p in parsed]
+    else:
+        rows = _parse_model_json(resp.text)
+
+    out: dict[str, dict] = {}
+    for row in rows:
+        zid = row.get("zone_id")
+        if not zid:
+            continue
+        ann = row.get("announcements", {})
+        if isinstance(ann, list):
+            ann = {a.get("lang"): a.get("text") for a in ann
+                   if a.get("lang") and a.get("text")}
+        row["announcements"] = ann
+        out[zid] = row
+    return out
 
 
 def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
@@ -171,10 +230,15 @@ def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
     import time
 
     from google import genai
-    from google.genai import errors
+    from google.genai import errors, types
 
     client = genai.Client(api_key=settings.gemini_api_key)
     prompt = _build_prompt(items, snapshot, langs)
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=list[_GenRecommendation],
+        temperature=0.5,
+    )
 
     models = [settings.gemini_model]
     if settings.gemini_fallback_model and settings.gemini_fallback_model not in models:
@@ -184,9 +248,9 @@ def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
     for model in models:
         for attempt in range(_MAX_RETRIES):
             try:
-                resp = client.models.generate_content(model=model, contents=prompt)
-                parsed = _parse_model_json(resp.text)
-                return {row["zone_id"]: row for row in parsed if "zone_id" in row}
+                resp = client.models.generate_content(
+                    model=model, contents=prompt, config=config)
+                return _rows_from_response(resp)
             except errors.ServerError as exc:  # 5xx overload — retry this model
                 last_exc = exc
                 if attempt < _MAX_RETRIES - 1:

@@ -41,8 +41,14 @@ multilingual comms — not just a nice-to-have.
   avoids "emergency," while a restroom-queue message is casual — same copilot,
   situationally-appropriate voice. This is the register distinction the SME
   explicitly praised in the explainer session.
-- _next:_ few-shot examples to lock tone; JSON schema mode to drop the tolerant
-  parser.
+- **v3 (current):** **structured output + few-shot.** The Gemini call now sends
+  `response_schema` (a Pydantic model) with `response_mime_type=application/json`,
+  so every response is schema-valid — the tolerant fence-stripping parser is now
+  just a safety net, not the primary path. Added two compact few-shot examples
+  (a medical case and a facility case) that lock the register; announcements are
+  modelled as a `list[{lang,text}]` (structured output needs fixed fields, not
+  arbitrary dict keys) and folded back to `{lang: text}`. Verified live: cleaner,
+  more consistent tone and all requested languages present every call.
 
 ## Reliability engineering (real story for the post)
 
