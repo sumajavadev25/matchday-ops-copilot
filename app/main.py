@@ -3,12 +3,19 @@
 Endpoints:
   GET  /                 accessible control-room dashboard
   GET  /api/health       liveness + whether GenAI is configured
-  GET  /api/snapshot     current stadium state (seed or last upload)
-  POST /api/analyze      run the copilot over the current snapshot
-  POST /api/upload       replace the snapshot with uploaded CSV real data
+  GET  /api/snapshot     current (live-advancing) stadium state
+  GET  /api/triage       per-zone risk + projection, incident-aware (cheap, no LLM)
+  POST /api/analyze      run the copilot over the current state (uses Gemini)
+  POST /api/upload       replace the state with uploaded CSV real data
+  POST /api/reset        restore the seeded demo state
+
+The stadium state advances over time via a crowd-flow simulation, so the
+dashboard reads like a live control room. Triage is cheap and refreshed on
+every poll; the (costlier) LLM reasoning runs only on demand via /api/analyze.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, File, Request, UploadFile
@@ -18,16 +25,23 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .copilot import build_report, zone_risks
 from .data import parse_incidents_csv, parse_zones_csv, seed_snapshot
-from .models import StadiumSnapshot
+from .simulation import SimState, advance, etas_for, new_sim
 
-app = FastAPI(title="MatchDay Ops Copilot", version="0.1.0")
+app = FastAPI(title="MatchDay Ops Copilot", version="0.2.0")
 
 _STATIC = Path(__file__).parent / "static"
 
-# Single-process in-memory state is enough for a demo control room.
-_state: dict[str, StadiumSnapshot] = {"snapshot": seed_snapshot()}
-
 MAX_UPLOAD_BYTES = 2_000_000  # reject oversized uploads before parsing
+
+# Single-process in-memory simulation is enough for a demo control room.
+_state: dict[str, SimState] = {"sim": new_sim(seed_snapshot(), time.monotonic())}
+
+
+def _advance_now() -> tuple[SimState, dict]:
+    """Step the sim to the present and return it with fresh per-zone ETAs."""
+    sim = _state["sim"]
+    advance(sim, time.monotonic())
+    return sim, etas_for(sim)
 
 
 @app.middleware("http")
@@ -47,18 +61,24 @@ def health() -> dict:
 
 
 @app.get("/api/snapshot")
-def get_snapshot() -> StadiumSnapshot:
-    return _state["snapshot"]
+def get_snapshot() -> dict:
+    sim, _ = _advance_now()
+    return sim.snapshot.model_dump()
 
 
 @app.get("/api/triage")
 def get_triage() -> dict:
-    """Per-zone risk (incident-aware) for the dashboard table."""
-    snap = _state["snapshot"]
-    zones = [{
-        "zone_id": z.id, "name": z.name, "occupancy": z.occupancy,
-        "capacity": z.capacity, "density": round(z.density, 3), "risk": r.value,
-    } for z, r in zone_risks(snap)]
+    """Per-zone risk + forward projection. Cheap (no LLM) — safe to poll live."""
+    sim, etas = _advance_now()
+    snap = sim.snapshot
+    zones = []
+    for z, r in zone_risks(snap, etas=etas):
+        eta = etas.get(z.id)
+        zones.append({
+            "zone_id": z.id, "name": z.name, "occupancy": z.occupancy,
+            "capacity": z.capacity, "density": round(z.density, 3), "risk": r.value,
+            "eta_seconds": round(eta) if eta is not None else None,
+        })
     names = {z.id: z.name for z in snap.zones}
     incidents = [{
         "id": i.id, "type": i.type.value, "zone": names.get(i.zone_id, i.zone_id),
@@ -70,7 +90,8 @@ def get_triage() -> dict:
 
 @app.post("/api/analyze")
 def analyze() -> JSONResponse:
-    report = build_report(_state["snapshot"])
+    sim, etas = _advance_now()
+    report = build_report(sim.snapshot, etas=etas)
     return JSONResponse(report.model_dump())
 
 
@@ -100,7 +121,7 @@ async def upload(zones: UploadFile = File(...),
             except UnicodeDecodeError:
                 pass  # incidents are optional; a bad file just means none loaded
 
-    _state["snapshot"] = result.snapshot
+    _state["sim"] = new_sim(result.snapshot, time.monotonic())
     return JSONResponse({
         "zones_loaded": result.zones_loaded,
         "incidents_loaded": len(result.snapshot.incidents),
@@ -110,7 +131,7 @@ async def upload(zones: UploadFile = File(...),
 
 @app.post("/api/reset")
 def reset() -> dict:
-    _state["snapshot"] = seed_snapshot()
+    _state["sim"] = new_sim(seed_snapshot(), time.monotonic())
     return {"status": "reset"}
 
 

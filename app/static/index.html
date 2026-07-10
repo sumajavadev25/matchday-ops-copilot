@@ -69,6 +69,7 @@
 
   <main id="main">
     <div class="bar">
+      <button id="live" type="button" aria-pressed="false">▶ Go live</button>
       <button id="analyze" type="button">Run analysis</button>
       <button id="refresh" type="button" class="secondary">Reload snapshot</button>
       <button id="reset" type="button" class="secondary">Reset to demo data</button>
@@ -92,7 +93,8 @@
         </caption>
         <thead>
           <tr><th scope="col">Zone</th><th scope="col">Occupancy</th>
-              <th scope="col">Density</th><th scope="col">Level</th></tr>
+              <th scope="col">Density</th><th scope="col">Fills in</th>
+              <th scope="col">Level</th></tr>
         </thead>
         <tbody id="zones-body"></tbody>
       </table>
@@ -129,6 +131,11 @@
   <script>
     const $ = (s) => document.querySelector(s);
     const pct = (d) => Math.round(d * 100) + "%";
+    const fmtEta = (s) => {
+      if (s == null) return '<span class="muted">—</span>';
+      if (s < 60) return `<strong>${Math.round(s)}s</strong>`;
+      return `<strong>${Math.round(s / 60)}m</strong>`;
+    };
 
     async function loadSnapshot() {
       // /api/triage gives incident-aware risk from the backend's single source
@@ -147,6 +154,7 @@
           <td>${z.occupancy.toLocaleString()} / ${z.capacity.toLocaleString()}</td>
           <td><div class="meter" role="img" aria-label="${pct(d)} full">
                 <span style="width:${Math.min(d*100,100)}%"></span></div> ${pct(d)}</td>
+          <td>${fmtEta(z.eta_seconds)}</td>
           <td><span class="pill r-${z.risk}">${z.risk}</span></td>`;
         body.appendChild(tr);
       }
@@ -180,8 +188,10 @@
         const color = RISK_COLORS[z.risk] || RISK_COLORS.normal;
         const g = svgEl("g", { tabindex: "0", role: "img",
           "aria-label": `${z.name}: ${Math.round(z.density * 100)}% full, ${z.risk} risk` });
+        const etaTxt = z.eta_seconds == null ? "" :
+          `, fills in ~${z.eta_seconds < 60 ? Math.round(z.eta_seconds) + "s" : Math.round(z.eta_seconds / 60) + "m"}`;
         g.appendChild(svgEl("title", {})).textContent =
-          `${z.name} — ${z.occupancy}/${z.capacity} (${Math.round(z.density * 100)}%), ${z.risk}`;
+          `${z.name} — ${z.occupancy}/${z.capacity} (${Math.round(z.density * 100)}%), ${z.risk}${etaTxt}`;
         const c = svgEl("circle", { cx: px, cy: py, r: z.risk === "critical" ? 17 : 13,
           fill: color, stroke: "#0f1420", "stroke-width": 2 });
         if (z.risk === "critical") {
@@ -256,6 +266,23 @@
     }
 
     function esc(s) { const p = document.createElement("p"); p.textContent = s ?? ""; return p.innerHTML; }
+
+    // Live mode: poll the cheap /api/triage (no LLM) so the room feels real.
+    let liveTimer = null;
+    function setLive(on) {
+      const btn = $("#live");
+      btn.setAttribute("aria-pressed", String(on));
+      if (on) {
+        btn.textContent = "⏸ Pause live";
+        btn.classList.remove("secondary");
+        loadSnapshot();
+        liveTimer = setInterval(loadSnapshot, 3000);
+      } else {
+        btn.textContent = "▶ Go live";
+        clearInterval(liveTimer); liveTimer = null;
+      }
+    }
+    $("#live").addEventListener("click", () => setLive(liveTimer === null));
 
     $("#analyze").addEventListener("click", analyze);
     $("#refresh").addEventListener("click", loadSnapshot);

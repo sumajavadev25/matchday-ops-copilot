@@ -71,6 +71,31 @@ def assess_zone(zone: Zone, incidents: list[Incident], threshold: float) -> Risk
     return RiskLevel.NORMAL
 
 
+_RISK_ORDER = {RiskLevel.NORMAL: 0, RiskLevel.ELEVATED: 1,
+               RiskLevel.HIGH: 2, RiskLevel.CRITICAL: 3}
+
+
+def _eta_risk(eta_seconds: float | None) -> RiskLevel:
+    """Turn a projected time-to-capacity into a risk level. This is what makes
+    the copilot predictive: a zone filling fast is urgent *before* it's full."""
+    if eta_seconds is None:
+        return RiskLevel.NORMAL
+    if eta_seconds <= 60:
+        return RiskLevel.CRITICAL
+    if eta_seconds <= 150:
+        return RiskLevel.HIGH
+    if eta_seconds <= 300:
+        return RiskLevel.ELEVATED
+    return RiskLevel.NORMAL
+
+
+def combined_risk(zone: Zone, incidents: list[Incident], threshold: float,
+                  eta_seconds: float | None = None) -> RiskLevel:
+    """The worse of current-state triage and the forward projection."""
+    base = assess_zone(zone, incidents, threshold)
+    return max(base, _eta_risk(eta_seconds), key=lambda r: _RISK_ORDER[r])
+
+
 def _suggest_relief_zone(zone: Zone, snapshot: StadiumSnapshot) -> Zone | None:
     """Least-crowded zone to redirect flow toward. O(zones), single pass."""
     best: Zone | None = None
@@ -83,17 +108,26 @@ def _suggest_relief_zone(zone: Zone, snapshot: StadiumSnapshot) -> Zone | None:
 
 
 def zone_risks(snapshot: StadiumSnapshot,
-               threshold: float | None = None) -> list[tuple[Zone, RiskLevel]]:
+               threshold: float | None = None,
+               etas: dict[str, float | None] | None = None,
+               ) -> list[tuple[Zone, RiskLevel]]:
     """Risk for every zone (including normal ones). Single source of truth for
-    the dashboard table so it can't drift from the copilot's triage."""
+    the dashboard table so it can't drift from the copilot's triage.
+    When `etas` is supplied, risk also accounts for the forward projection."""
     threshold = settings.crowd_alert_threshold if threshold is None else threshold
-    return [(z, assess_zone(z, snapshot.incidents, threshold)) for z in snapshot.zones]
+    etas = etas or {}
+    return [(z, combined_risk(z, snapshot.incidents, threshold, etas.get(z.id)))
+            for z in snapshot.zones]
 
 
-def triage(snapshot: StadiumSnapshot, threshold: float) -> list[tuple[Zone, RiskLevel]]:
+def triage(snapshot: StadiumSnapshot, threshold: float,
+           etas: dict[str, float | None] | None = None,
+           ) -> list[tuple[Zone, RiskLevel]]:
     """All zones needing attention (ELEVATED+), most severe first."""
     order = {RiskLevel.CRITICAL: 0, RiskLevel.HIGH: 1, RiskLevel.ELEVATED: 2, RiskLevel.NORMAL: 3}
-    scored = [(z, assess_zone(z, snapshot.incidents, threshold)) for z in snapshot.zones]
+    etas = etas or {}
+    scored = [(z, combined_risk(z, snapshot.incidents, threshold, etas.get(z.id)))
+              for z in snapshot.zones]
     flagged = [(z, r) for z, r in scored if r != RiskLevel.NORMAL]
     flagged.sort(key=lambda pair: (order[pair[1]], -pair[0].density))
     return flagged
@@ -122,11 +156,14 @@ def _fallback_recommendation(zone: Zone, risk: RiskLevel, relief: Zone | None) -
 
 
 def _build_prompt(items: list[tuple[Zone, RiskLevel, Zone | None]],
-                  snapshot: StadiumSnapshot, langs: list[str]) -> str:
+                  snapshot: StadiumSnapshot, langs: list[str],
+                  etas: dict[str, float | None] | None = None) -> str:
+    etas = etas or {}
     payload = []
     for zone, risk, relief in items:
         open_inc = [i.model_dump() for i in snapshot.incidents
                     if i.zone_id == zone.id and not i.resolved]
+        eta = etas.get(zone.id)
         payload.append({
             "zone_id": zone.id,
             "zone_name": zone.name,
@@ -134,6 +171,7 @@ def _build_prompt(items: list[tuple[Zone, RiskLevel, Zone | None]],
             "density_pct": round(zone.density * 100),
             "capacity": zone.capacity,
             "occupancy": zone.occupancy,
+            "projected_full_in_seconds": round(eta) if eta is not None else None,
             "open_incidents": open_inc,
             "suggested_relief_zone": relief.name if relief else None,
         })
@@ -141,6 +179,10 @@ def _build_prompt(items: list[tuple[Zone, RiskLevel, Zone | None]],
         "You are the operations copilot in a FIFA World Cup 2026 stadium control room. "
         "For each flagged zone below, produce an explainable recommendation for venue "
         "staff. Be specific and operational; every recommendation MUST justify itself.\n\n"
+        "GROUND every statement in the data provided — cite the density, the "
+        "projected_full_in_seconds, and any open_incidents. Do NOT invent specific "
+        "turnstile numbers, staff names, facilities, or details that are not in the "
+        "data. If a zone is projected to fill soon, say so and treat it as urgent.\n\n"
         f"Flagged zones (JSON):\n{json.dumps(payload, indent=2)}\n\n"
         "Announcement register — match tone to the situation, do not use one flat "
         "voice:\n"
@@ -217,7 +259,8 @@ def _rows_from_response(resp) -> dict[str, dict]:
 
 def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
                        snapshot: StadiumSnapshot,
-                       langs: list[str]) -> dict[str, dict]:
+                       langs: list[str],
+                       etas: dict[str, float | None] | None = None) -> dict[str, dict]:
     """Call Gemini for explanations + announcements. Returns {zone_id: fields}.
 
     Resilience, in order: for each model in the chain (primary, then a lighter
@@ -233,7 +276,7 @@ def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
     from google.genai import errors, types
 
     client = genai.Client(api_key=settings.gemini_api_key)
-    prompt = _build_prompt(items, snapshot, langs)
+    prompt = _build_prompt(items, snapshot, langs, etas)
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=list[_GenRecommendation],
@@ -263,12 +306,15 @@ def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
 
 def build_report(snapshot: StadiumSnapshot,
                  threshold: float | None = None,
-                 langs: list[str] | None = None) -> CopilotReport:
-    """Full pipeline: triage → (Gemini reasoning | fallback) → assembled report."""
+                 langs: list[str] | None = None,
+                 etas: dict[str, float | None] | None = None) -> CopilotReport:
+    """Full pipeline: triage → (Gemini reasoning | fallback) → assembled report.
+    `etas` (projected seconds-to-capacity per zone) makes triage and the model
+    reasoning predictive, not just reactive."""
     threshold = settings.crowd_alert_threshold if threshold is None else threshold
     langs = langs or _DEFAULT_LANGS
 
-    flagged = triage(snapshot, threshold)
+    flagged = triage(snapshot, threshold, etas)
     items = [(z, r, _suggest_relief_zone(z, snapshot)) for z, r in flagged]
 
     if not items:
@@ -279,7 +325,7 @@ def build_report(snapshot: StadiumSnapshot,
     reasoning_by_zone: dict[str, dict] = {}
     if settings.genai_enabled:
         try:
-            reasoning_by_zone = generate_reasoning(items, snapshot, langs)
+            reasoning_by_zone = generate_reasoning(items, snapshot, langs, etas)
             generated_by = "gemini"
         except Exception:
             # Never let a model hiccup take down the control room.

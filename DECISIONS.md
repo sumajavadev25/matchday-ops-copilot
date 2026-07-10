@@ -69,6 +69,28 @@ Live testing hit two real failure modes against the free tier, both fixed:
 Takeaway for the post: the interesting engineering wasn't the prompt — it was
 making a mandatory external dependency reliable enough to trust in production.
 
+## Real-time + predictive (the "control room" upgrade)
+
+Two additions that move it from a static demo to a live tool:
+
+- **Live crowd-flow simulation** (`simulation.py`): the stadium state advances
+  over time (persons/sec per zone, deterministic stepping, "redirect relief"
+  when a gate fills). A **Go live** toggle polls the *cheap* `/api/triage`
+  (no LLM) every 3s, so the board moves and the map recolours in real time —
+  while the costlier Gemini reasoning stays on-demand (cost-aware by design).
+- **Predictive time-to-capacity**: each zone projects seconds-to-full from its
+  current inflow. Triage now takes the worse of current-state and projection,
+  so a zone at 65% that's filling fast is flagged **HIGH before it's full** —
+  genuine "operational intelligence", not just a live dashboard. The projection
+  is fed to Gemini too, so reasoning reads "…full in ~52s, redirect now".
+
+## Grounding
+
+Prompt now instructs the model to cite only the provided data (density,
+projected_full_in_seconds, open_incidents) and to NOT invent turnstile numbers,
+staff, or facilities. Removes the plausible-but-ungrounded specifics a judge
+would probe.
+
 ## Scoring levers deliberately targeted
 
 - **Testing:** 35 tests, edge cases first (zero/over capacity, malformed CSV).

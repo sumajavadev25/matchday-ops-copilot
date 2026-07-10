@@ -31,6 +31,8 @@ def test_triage_endpoint_is_incident_aware():
     assert len(zones) == 6  # every zone, including normal ones
     # Gate C is 98% AND has a severity-4 medical incident -> critical, not just high.
     assert zones["gate-c"]["risk"] == "critical"
+    # Every zone carries a forward projection field (seconds-to-full or null).
+    assert all("eta_seconds" in z for z in zones.values())
 
 
 def test_analyze_returns_recommendations():

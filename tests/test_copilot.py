@@ -47,6 +47,34 @@ def test_zero_capacity_zone_with_people_is_critical():
     assert assess_zone(z(10, cap=0), [], T) == RiskLevel.CRITICAL
 
 
+def test_eta_risk_thresholds():
+    assert copilot._eta_risk(None) == RiskLevel.NORMAL
+    assert copilot._eta_risk(30) == RiskLevel.CRITICAL
+    assert copilot._eta_risk(120) == RiskLevel.HIGH
+    assert copilot._eta_risk(250) == RiskLevel.ELEVATED
+    assert copilot._eta_risk(600) == RiskLevel.NORMAL
+
+
+def test_combined_risk_escalates_a_calm_but_fast_filling_zone():
+    # 50% full is NORMAL by density, but if it fills in 30s it's CRITICAL.
+    calm = z(500, cap=1000)
+    assert assess_zone(calm, [], T) == RiskLevel.NORMAL
+    assert copilot.combined_risk(calm, [], T, eta_seconds=30) == RiskLevel.CRITICAL
+
+
+def test_combined_risk_takes_the_worse_of_current_and_projected():
+    # Already HIGH by density; a slow projection must not de-escalate it.
+    busy = z(820, cap=1000)
+    assert copilot.combined_risk(busy, [], T, eta_seconds=9999) == RiskLevel.HIGH
+
+
+def test_triage_flags_a_predicted_zone_that_density_alone_would_miss():
+    snap = StadiumSnapshot(zones=[z(500, id="a")])  # 50% — normal by density
+    assert triage(snap, T) == []                    # nothing without projection
+    flagged = triage(snap, T, etas={"a": 30})       # fills in 30s → flagged
+    assert flagged and flagged[0][1] == RiskLevel.CRITICAL
+
+
 def test_triage_orders_critical_first():
     snap = StadiumSnapshot(zones=[z(820, id="a"), z(1000, id="b"), z(500, id="c")])
     ordered = triage(snap, T)
@@ -87,7 +115,7 @@ def test_build_report_no_key_uses_fallback():
 def test_build_report_uses_gemini_output_when_available(monkeypatch):
     # Simulate a configured key + a successful model call (no real network).
     monkeypatch.setattr(settings, "gemini_api_key", "test-key")
-    monkeypatch.setattr(copilot, "generate_reasoning", lambda items, snap, langs: {
+    monkeypatch.setattr(copilot, "generate_reasoning", lambda items, snap, langs, etas=None: {
         "a": {"zone_id": "a", "headline": "H", "reasoning": "R", "action": "A",
               "announcements": {"en": "hi", "es": "hola", "fr": "salut"}},
     })
@@ -100,7 +128,7 @@ def test_build_report_falls_back_when_gemini_errors(monkeypatch):
     # A model failure must degrade gracefully, never crash the control room.
     monkeypatch.setattr(settings, "gemini_api_key", "test-key")
 
-    def boom(items, snap, langs):
+    def boom(items, snap, langs, etas=None):
         raise RuntimeError("model down")
 
     monkeypatch.setattr(copilot, "generate_reasoning", boom)
