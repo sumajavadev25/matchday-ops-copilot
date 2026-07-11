@@ -272,32 +272,21 @@ def _rows_from_response(resp) -> dict[str, dict]:
     return out
 
 
-def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
-                       snapshot: StadiumSnapshot,
-                       langs: list[str],
-                       etas: dict[str, float | None] | None = None) -> dict[str, dict]:
-    """Call Gemini for explanations + announcements. Returns {zone_id: fields}.
+def _generate_with_failover(contents, config):
+    """Run a Gemini call across the model chain with our resilience policy.
 
-    Resilience, in order: for each model in the chain (primary, then a lighter
-    fallback), retry transient 5xx overloads with jittered backoff; on 429
-    rate-limit or a retired/invalid model, move straight to the next model.
-    Only if the whole chain fails does the caller fall back to non-AI output.
-    This keeps GenAI functional under the load we actually saw in testing.
+    For each model (primary, then a lighter fallback): retry transient 5xx
+    overloads with jittered backoff; on 429 rate-limit or a retired/invalid
+    model, move straight to the next model. Shared by every LLM feature so the
+    reliability engineering lives in exactly one place.
     """
     import random
     import time
 
     from google import genai
-    from google.genai import errors, types
+    from google.genai import errors
 
     client = genai.Client(api_key=settings.gemini_api_key)
-    prompt = _build_prompt(items, snapshot, langs, etas)
-    config = types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=list[_GenRecommendation],
-        temperature=0.5,
-    )
-
     models = [settings.gemini_model]
     if settings.gemini_fallback_model and settings.gemini_fallback_model not in models:
         models.append(settings.gemini_fallback_model)
@@ -306,9 +295,8 @@ def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
     for model in models:
         for attempt in range(_MAX_RETRIES):
             try:
-                resp = client.models.generate_content(
-                    model=model, contents=prompt, config=config)
-                return _rows_from_response(resp)
+                return client.models.generate_content(
+                    model=model, contents=contents, config=config)
             except errors.ServerError as exc:  # 5xx overload — retry this model
                 last_exc = exc
                 if attempt < _MAX_RETRIES - 1:
@@ -317,6 +305,66 @@ def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
                 last_exc = exc
                 break
     raise last_exc if last_exc else RuntimeError("gemini call failed")
+
+
+def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
+                       snapshot: StadiumSnapshot,
+                       langs: list[str],
+                       etas: dict[str, float | None] | None = None) -> dict[str, dict]:
+    """Call Gemini for explanations + announcements. Returns {zone_id: fields}."""
+    from google.genai import types
+
+    prompt = _build_prompt(items, snapshot, langs, etas)
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=list[_GenRecommendation],
+        temperature=0.5,
+    )
+    resp = _generate_with_failover(prompt, config)
+    return _rows_from_response(resp)
+
+
+def _state_briefing(snapshot: StadiumSnapshot,
+                    etas: dict[str, float | None] | None = None) -> str:
+    """Compact JSON of the live state the copilot may reason over."""
+    etas = etas or {}
+    zones = []
+    for z in snapshot.zones:
+        eta = etas.get(z.id)
+        zones.append({
+            "zone": z.name, "density_pct": round(z.density * 100),
+            "occupancy": z.occupancy, "capacity": z.capacity,
+            "projected_full_in_seconds": round(eta) if eta is not None else None,
+            "risk": combined_risk(z, snapshot.incidents,
+                                  settings.crowd_alert_threshold, eta).value,
+        })
+    incidents = [{"type": i.type.value, "zone_id": i.zone_id, "severity": i.severity,
+                  "description": i.description}
+                 for i in snapshot.incidents if not i.resolved]
+    return json.dumps({"zones": zones, "incidents": incidents}, indent=2)
+
+
+def answer_question(question: str, snapshot: StadiumSnapshot,
+                    etas: dict[str, float | None] | None = None) -> str:
+    """Answer an operator's free-text question, grounded in the live state.
+
+    Turns the tool from a one-shot report generator into a conversational
+    copilot: supports "what's my top priority?" and "what if I close Gate B?".
+    """
+    briefing = _state_briefing(snapshot, etas)
+    prompt = (
+        "You are the operations copilot in a FIFA World Cup 2026 stadium control "
+        "room. Answer the control-room operator's question using ONLY the live "
+        "state below. Be concise and operational (2-4 sentences). Cite specific "
+        "zones, densities, and projections. For 'what if' questions, reason from "
+        "the data about the likely effect (e.g., closing a gate pushes its inflow "
+        "to the relief zone). If the data cannot answer it, say so plainly. Do "
+        "NOT invent zones, numbers, staff, or facilities not present in the data.\n\n"
+        f"Live state (JSON):\n{briefing}\n\n"
+        f"Operator question: {question.strip()}"
+    )
+    resp = _generate_with_failover(prompt, None)
+    return (resp.text or "").strip()
 
 
 def build_report(snapshot: StadiumSnapshot,

@@ -84,6 +84,22 @@ Two additions that move it from a static demo to a live tool:
   genuine "operational intelligence", not just a live dashboard. The projection
   is fed to Gemini too, so reasoning reads "…full in ~52s, redirect now".
 
+## Interactive copilot (`/api/ask`)
+
+Turned the tool from a one-shot report generator into a **conversational
+copilot**. The operator can ask free-text questions ("what's my top priority?",
+"what if I close Gate B?") and Gemini answers grounded in the live state,
+reasoning about hypotheticals (closing a gate pushes its inflow to relief zones)
+without inventing data. All LLM features now share one `_generate_with_failover`
+helper, so the retry/model-failover reliability logic lives in a single place.
+
+## Security hardening
+
+Per-client fixed-window **rate limiter** on `/api/*` (stops abuse; generous vs.
+the ~20/min live polling), a **Content-Security-Policy** locking the app to
+same-origin (no external script/style/img/connect), plus the existing nosniff /
+frame-options / referrer headers and the upload size + question length caps.
+
 ## Grounding
 
 Prompt now instructs the model to cite only the provided data (density,

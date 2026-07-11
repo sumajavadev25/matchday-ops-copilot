@@ -113,6 +113,20 @@
       <div id="recs"></div>
     </section>
 
+    <section aria-labelledby="ask-h">
+      <h2 id="ask-h">Ask the copilot</h2>
+      <p class="muted" style="margin-top:0">Ask about the live state, or explore a “what if”. Answers are grounded in the current data.</p>
+      <div id="ask-chips" style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.6rem"></div>
+      <form id="ask-form" style="display:flex;gap:.5rem;flex-wrap:wrap">
+        <input id="ask-input" type="text" maxlength="500" autocomplete="off"
+               aria-label="Ask the copilot a question about the live stadium state"
+               placeholder="e.g. What's my top priority right now?"
+               style="flex:1;min-width:220px;padding:.6rem;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)">
+        <button type="submit">Ask</button>
+      </form>
+      <p id="ask-answer" class="status" role="status" aria-live="polite" style="margin-top:.6rem"></p>
+    </section>
+
     <section aria-labelledby="upload-h">
       <h2 id="upload-h">Upload real data</h2>
       <p class="muted">Replace the demo snapshot with a real zones CSV
@@ -285,6 +299,39 @@
       }
     }
     $("#live").addEventListener("click", () => setLive(liveTimer === null));
+
+    // "Ask the copilot" — conversational Q&A grounded in the live state.
+    const ASK_SUGGESTIONS = [
+      "What's my top priority right now?",
+      "What if I close Gate B?",
+      "Which zones are safe?",
+      "Where should I send extra staff?",
+    ];
+    function renderAskChips() {
+      const box = $("#ask-chips");
+      for (const q of ASK_SUGGESTIONS) {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "secondary"; b.textContent = q;
+        b.style.cssText = "font-size:.82rem;padding:.35rem .6rem";
+        b.addEventListener("click", () => { $("#ask-input").value = q; askQuestion(q); });
+        box.appendChild(b);
+      }
+    }
+    async function askQuestion(q) {
+      if (!q?.trim()) return;
+      $("#ask-answer").textContent = "Thinking…";
+      try {
+        const r = await fetch("/api/ask", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: q.trim() }),
+        });
+        const d = await r.json();
+        // Strip markdown bold markers; keep textContent for XSS safety.
+        $("#ask-answer").textContent = (d.answer || "No answer.").replace(/\*\*/g, "");
+      } catch { $("#ask-answer").textContent = "Could not reach the copilot."; }
+    }
+    $("#ask-form").addEventListener("submit", (e) => { e.preventDefault(); askQuestion($("#ask-input").value); });
+    renderAskChips();
 
     $("#analyze").addEventListener("click", analyze);
     $("#refresh").addEventListener("click", loadSnapshot);

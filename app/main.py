@@ -21,20 +21,50 @@ from pathlib import Path
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from .config import settings
-from .copilot import build_report, zone_risks
+from .copilot import answer_question, build_report, zone_risks
 from .data import parse_incidents_csv, parse_zones_csv, seed_snapshot
 from .simulation import SimState, advance, etas_for, new_sim
 
-app = FastAPI(title="MatchDay Ops Copilot", version="0.2.0")
+app = FastAPI(title="MatchDay Ops Copilot", version="0.3.0")
 
 _STATIC = Path(__file__).parent / "static"
 
 MAX_UPLOAD_BYTES = 2_000_000  # reject oversized uploads before parsing
+MAX_QUESTION_CHARS = 500      # cap free-text input to the copilot
+
+# Self-contained CSP: no external origins (all CSS/JS is inline and same-origin).
+_CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'")
 
 # Single-process in-memory simulation is enough for a demo control room.
 _state: dict[str, SimState] = {"sim": new_sim(seed_snapshot(), time.monotonic())}
+
+
+class RateLimiter:
+    """Fixed-window per-key limiter. Small, dependency-free, unit-testable."""
+
+    def __init__(self, limit: int, window: float) -> None:
+        self.limit = limit
+        self.window = window
+        self._hits: dict[str, list[float]] = {}
+
+    def allow(self, key: str, now: float) -> bool:
+        bucket = self._hits.get(key)
+        if bucket is None or now - bucket[0] >= self.window:
+            self._hits[key] = [now, 1]
+            return True
+        if bucket[1] >= self.limit:
+            return False
+        bucket[1] += 1
+        return True
+
+
+# Generous: live polling is ~20/min; this only stops abuse.
+_limiter = RateLimiter(limit=300, window=60.0)
 
 
 def _advance_now() -> tuple[SimState, dict]:
@@ -45,12 +75,17 @@ def _advance_now() -> tuple[SimState, dict]:
 
 
 @app.middleware("http")
-async def security_headers(request: Request, call_next):
-    """Baseline hardening headers on every response."""
+async def security_and_limits(request: Request, call_next):
+    """Rate-limit the API per client, then add baseline hardening headers."""
+    if request.url.path.startswith("/api/"):
+        client = request.client.host if request.client else "unknown"
+        if not _limiter.allow(client, time.monotonic()):
+            return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
     resp = await call_next(request)
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Content-Security-Policy"] = _CSP
     return resp
 
 
@@ -93,6 +128,27 @@ def analyze() -> JSONResponse:
     sim, etas = _advance_now()
     report = build_report(sim.snapshot, etas=etas)
     return JSONResponse(report.model_dump())
+
+
+class AskRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=MAX_QUESTION_CHARS)
+
+
+@app.post("/api/ask")
+def ask(req: AskRequest) -> JSONResponse:
+    """Conversational copilot: answer an operator's question over the live state."""
+    if not settings.genai_enabled:
+        return JSONResponse(
+            {"answer": "The copilot needs a configured Gemini key to answer.",
+             "generated_by": "unavailable"})
+    sim, etas = _advance_now()
+    try:
+        answer = answer_question(req.question, sim.snapshot, etas)
+        return JSONResponse({"answer": answer, "generated_by": "gemini"})
+    except Exception:
+        return JSONResponse(
+            {"answer": "The copilot is briefly unavailable — please retry.",
+             "generated_by": "unavailable"}, status_code=503)
 
 
 @app.post("/api/upload")

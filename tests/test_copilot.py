@@ -244,6 +244,25 @@ def test_generate_reasoning_parses_structured_output(monkeypatch):
     assert out["a"]["announcements"] == {"en": "hi", "es": "hola"}
 
 
+def test_answer_question_grounds_in_state(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    captured = {}
+
+    class Resp:
+        text = "  Gate C is your top priority.  "
+
+    def fake_gen(contents, config):
+        captured["contents"] = contents
+        return Resp()
+
+    monkeypatch.setattr(copilot, "_generate_with_failover", fake_gen)
+    snap = StadiumSnapshot(zones=[z(4900, cap=5000, id="gate-c")])
+    out = copilot.answer_question("What's my priority?", snap, {"gate-c": 40})
+    assert out == "Gate C is your top priority."          # trimmed
+    assert "GATE-C" in captured["contents"]                # state briefing included
+    assert "What's my priority?" in captured["contents"]   # question included
+
+
 def test_prompt_includes_few_shot_examples():
     snap = StadiumSnapshot(zones=[z(1000, id="a")])
     prompt = copilot._build_prompt([(snap.zones[0], RiskLevel.CRITICAL, None)], snap, ["en"])

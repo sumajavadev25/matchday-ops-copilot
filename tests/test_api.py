@@ -83,6 +83,42 @@ def test_triage_lists_open_incidents_only():
     assert any(i["zone"] == "Gate C" for i in inc)
 
 
+def test_csp_header_present():
+    r = client.get("/api/health")
+    assert "default-src 'self'" in r.headers["content-security-policy"]
+
+
+def test_rate_limiter_allows_then_blocks():
+    from app.main import RateLimiter
+    rl = RateLimiter(limit=2, window=10)
+    assert rl.allow("ip", 0) is True
+    assert rl.allow("ip", 1) is True
+    assert rl.allow("ip", 2) is False    # third within window blocked
+    assert rl.allow("ip", 11) is True     # fresh window resets
+
+
+def test_ask_without_key_is_graceful():
+    # conftest disables the key, so the copilot answers that it needs one.
+    r = client.post("/api/ask", json={"question": "what's my priority?"})
+    assert r.status_code == 200
+    assert r.json()["generated_by"] == "unavailable"
+
+
+def test_ask_rejects_empty_question():
+    r = client.post("/api/ask", json={"question": ""})
+    assert r.status_code == 422  # pydantic min_length
+
+
+def test_ask_answers_with_copilot(monkeypatch):
+    from app import main as m
+    monkeypatch.setattr(m.settings, "gemini_api_key", "test-key")  # enable genai
+    monkeypatch.setattr(m, "answer_question",
+                        lambda q, snap, etas: "Redirect arrivals to Gate D.")
+    r = client.post("/api/ask", json={"question": "what if I close Gate B?"})
+    assert r.status_code == 200
+    assert r.json() == {"answer": "Redirect arrivals to Gate D.", "generated_by": "gemini"}
+
+
 def test_index_served():
     r = client.get("/")
     assert r.status_code == 200
