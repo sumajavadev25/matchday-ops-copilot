@@ -130,7 +130,9 @@
 
   <script>
     const $ = (s) => document.querySelector(s);
-    const pct = (d) => Math.round(d * 100) + "%";
+    // Floor so 4997/5000 reads 99%, not a misleading rounded-up 100%.
+    const pctNum = (d) => Math.min(Math.floor(d * 100), 100);
+    const pct = (d) => pctNum(d) + "%";
     const fmtEta = (s) => {
       if (s == null) return '<span class="muted">—</span>';
       if (s < 60) return `<strong>${Math.round(s)}s</strong>`;
@@ -187,11 +189,11 @@
         const py = cy + Math.sin(ang) * (ry + 34);
         const color = RISK_COLORS[z.risk] || RISK_COLORS.normal;
         const g = svgEl("g", { tabindex: "0", role: "img",
-          "aria-label": `${z.name}: ${Math.round(z.density * 100)}% full, ${z.risk} risk` });
+          "aria-label": `${z.name}: ${pctNum(z.density)}% full, ${z.risk} risk` });
         const etaTxt = z.eta_seconds == null ? "" :
           `, fills in ~${z.eta_seconds < 60 ? Math.round(z.eta_seconds) + "s" : Math.round(z.eta_seconds / 60) + "m"}`;
         g.appendChild(svgEl("title", {})).textContent =
-          `${z.name} — ${z.occupancy}/${z.capacity} (${Math.round(z.density * 100)}%), ${z.risk}${etaTxt}`;
+          `${z.name} — ${z.occupancy}/${z.capacity} (${pctNum(z.density)}%), ${z.risk}${etaTxt}`;
         const c = svgEl("circle", { cx: px, cy: py, r: z.risk === "critical" ? 17 : 13,
           fill: color, stroke: "#0f1420", "stroke-width": 2 });
         if (z.risk === "critical") {
@@ -206,7 +208,7 @@
         label.textContent = z.name;
         const pctText = svgEl("text", { x: px, y: py + 4, "text-anchor": "middle",
           fill: "#0f1420", "font-size": "10", "font-weight": "700" });
-        pctText.textContent = Math.round(z.density * 100) + "%";
+        pctText.textContent = pctNum(z.density) + "%";
         svg.appendChild(g); g.appendChild(label); g.appendChild(pctText);
       });
 

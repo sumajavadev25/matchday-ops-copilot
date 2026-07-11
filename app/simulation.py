@@ -35,11 +35,11 @@ def _initial_rate(zone: Zone) -> float:
     d = zone.density
     remaining = max(zone.capacity - zone.occupancy, zone.capacity * 0.05)
     if d >= 0.75:
-        target = 120.0        # busy: ~2 min to fill
+        target = 200.0        # busy: ~3 min to fill
     elif d >= 0.5:
-        target = 140.0        # mid: rising, predictive can escalate to HIGH
+        target = 300.0        # mid: ~5 min, predictive can escalate to HIGH
     else:
-        target = 450.0        # quiet: >5 min, stays NORMAL by projection
+        target = 900.0        # quiet: ~15 min, stays NORMAL by projection
     return remaining / target
 
 

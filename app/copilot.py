@@ -89,11 +89,26 @@ def _eta_risk(eta_seconds: float | None) -> RiskLevel:
     return RiskLevel.NORMAL
 
 
+def _density_ceiling(density: float) -> RiskLevel:
+    """The most severe level the *projection* alone may raise a zone to, given
+    how full it actually is. A half-empty gate that's merely trending up is not
+    a crush — you still have buffer — so prediction can nudge but not scream."""
+    if density >= 0.75:
+        return RiskLevel.CRITICAL
+    if density >= 0.55:
+        return RiskLevel.HIGH
+    if density >= 0.35:
+        return RiskLevel.ELEVATED
+    return RiskLevel.NORMAL
+
+
 def combined_risk(zone: Zone, incidents: list[Incident], threshold: float,
                   eta_seconds: float | None = None) -> RiskLevel:
-    """The worse of current-state triage and the forward projection."""
+    """The worse of current-state triage and the (density-capped) projection."""
     base = assess_zone(zone, incidents, threshold)
-    return max(base, _eta_risk(eta_seconds), key=lambda r: _RISK_ORDER[r])
+    ceiling = _density_ceiling(zone.density)
+    pred = min(_eta_risk(eta_seconds), ceiling, key=lambda r: _RISK_ORDER[r])
+    return max(base, pred, key=lambda r: _RISK_ORDER[r])
 
 
 def _suggest_relief_zone(zone: Zone, snapshot: StadiumSnapshot) -> Zone | None:

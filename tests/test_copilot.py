@@ -55,11 +55,21 @@ def test_eta_risk_thresholds():
     assert copilot._eta_risk(600) == RiskLevel.NORMAL
 
 
-def test_combined_risk_escalates_a_calm_but_fast_filling_zone():
-    # 50% full is NORMAL by density, but if it fills in 30s it's CRITICAL.
-    calm = z(500, cap=1000)
-    assert assess_zone(calm, [], T) == RiskLevel.NORMAL
-    assert copilot.combined_risk(calm, [], T, eta_seconds=30) == RiskLevel.CRITICAL
+def test_prediction_is_capped_by_how_full_a_zone_actually_is():
+    # 50% full but filling in 30s -> flagged, but NOT critical (still has buffer).
+    half = z(500, cap=1000)
+    assert assess_zone(half, [], T) == RiskLevel.NORMAL
+    assert copilot.combined_risk(half, [], T, eta_seconds=30) == RiskLevel.ELEVATED
+    # A genuinely full-and-imminent zone IS critical.
+    busy = z(800, cap=1000)
+    assert copilot.combined_risk(busy, [], T, eta_seconds=30) == RiskLevel.CRITICAL
+
+
+def test_density_ceiling_levels():
+    assert copilot._density_ceiling(0.9) == RiskLevel.CRITICAL
+    assert copilot._density_ceiling(0.6) == RiskLevel.HIGH
+    assert copilot._density_ceiling(0.4) == RiskLevel.ELEVATED
+    assert copilot._density_ceiling(0.2) == RiskLevel.NORMAL
 
 
 def test_combined_risk_takes_the_worse_of_current_and_projected():
@@ -71,8 +81,9 @@ def test_combined_risk_takes_the_worse_of_current_and_projected():
 def test_triage_flags_a_predicted_zone_that_density_alone_would_miss():
     snap = StadiumSnapshot(zones=[z(500, id="a")])  # 50% — normal by density
     assert triage(snap, T) == []                    # nothing without projection
-    flagged = triage(snap, T, etas={"a": 30})       # fills in 30s → flagged
-    assert flagged and flagged[0][1] == RiskLevel.CRITICAL
+    flagged = triage(snap, T, etas={"a": 30})       # fills in 30s → flagged early
+    # Flagged predictively, but capped at ELEVATED since it's only half full.
+    assert flagged and flagged[0][1] == RiskLevel.ELEVATED
 
 
 def test_triage_orders_critical_first():
