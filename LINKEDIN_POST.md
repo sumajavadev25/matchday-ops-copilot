@@ -41,6 +41,37 @@ Tools: **Gemini** (`flash` — cost-optimized on purpose; the challenge rewards 
 
 ---
 
+## ⭐ VIDEO-COMPANION POST (use this if you attach the demo video)
+
+The video carries the demo, so the text stays tight — hook, the engineering
+story, the links. Paste this as the post body with the 75s video attached.
+
+---
+
+🏟️ I built a stadium control room that decides — not just dashboards.
+
+For PromptWars Challenge 4, I made **MatchDay Ops Copilot** — real-time, explainable ops for a FIFA World Cup 2026 stadium. (Demo above 👆)
+
+What's in it:
+🔴 Live crowd flow that predicts which gates fill next — *before* they're full
+🧠 Gemini explains every call: the why, the action, and the announcement in English, Spanish & French
+💬 A copilot you can actually talk to — ask it "what if I close Gate B?" and it reasons from live data
+📂 Upload your own data — nothing is hardcoded
+
+As a backend dev, the split I cared about: I designed the deterministic parts (triage, routing, tests); Gemini did what rules can't (the reasoning + tone-aware multilingual comms).
+
+The hard part wasn't the prompt — it was reliability. Gemini's free tier threw retired-model 404s and overload 429/503s that silently killed the AI, so I added model failover + retry with backoff. It stays live under load.
+
+Vibe coding got me moving fast. Thinking like an engineer — tests, cost, graceful degradation — made it production-ready.
+
+🔗 Try it live: https://matchday-ops-copilot.onrender.com
+
+— Suma
+
+#PromptWars #BuildWithAI #GoogleAI #Gemini #GenAI #FIFAWorldCup2026 #BackendEngineering
+
+---
+
 ## OPTION A — short & punchy (higher engagement)
 
 Most stadium apps for a hackathon are a map + a chatbot. I wanted mine to make a **decision**.

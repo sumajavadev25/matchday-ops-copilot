@@ -49,8 +49,23 @@ def test_upload_real_data_replaces_snapshot():
     files = {"zones": ("zones.csv", io.BytesIO(csv.encode()), "text/csv")}
     r = client.post("/api/upload", files=files)
     assert r.status_code == 200
-    assert r.json()["zones_loaded"] == 2
+    body = r.json()
+    assert body["zones_loaded"] == 2
     assert len(client.get("/api/snapshot").json()["zones"]) == 2
+
+
+def test_upload_returns_dataset_summary():
+    csv = "id,name,capacity,occupancy\nx1,Gate X1,1000,990\nx2,Gate X2,3000,10\n"
+    inc = "id,type,zone_id,severity\ni1,medical,x1,4\ni2,facility,x2,2\n"
+    files = {
+        "zones": ("zones.csv", io.BytesIO(csv.encode()), "text/csv"),
+        "incidents": ("incidents.csv", io.BytesIO(inc.encode()), "text/csv"),
+    }
+    body = client.post("/api/upload", files=files).json()
+    assert body["total_capacity"] == 4000
+    assert body["total_occupancy"] == 1000
+    assert body["overall_density"] == 0.25
+    assert body["incident_types"] == {"medical": 1, "facility": 1}
 
 
 def test_upload_bad_csv_rejected():

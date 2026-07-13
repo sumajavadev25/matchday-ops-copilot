@@ -237,6 +237,23 @@
       }
     }
 
+    function renderUploadSummary(out) {
+      const nf = (n) => (n ?? 0).toLocaleString();
+      const density = Math.floor((out.overall_density || 0) * 100);
+      const types = out.incident_types || {};
+      const incBreak = Object.keys(types).length
+        ? Object.entries(types).map(([t, n]) => `${n} ${t}`).join(", ")
+        : "none";
+      const rows = [
+        `<strong>Now analysing your uploaded data.</strong>`,
+        `${nf(out.zones_loaded)} zones · total capacity ${nf(out.total_capacity)} · ` +
+        `${nf(out.total_occupancy)} people (${density}% full)`,
+        `Incidents: ${out.incidents_loaded ? `${out.incidents_loaded} (${incBreak})` : "none"}`,
+      ];
+      if (out.errors?.length) rows.push(`⚠️ ${out.errors.length} row(s) skipped: ${esc(out.errors[0])}`);
+      $("#upload-status").innerHTML = rows.map(r => `<div>${r}</div>`).join("");
+    }
+
     function renderIncidents(incidents) {
       const ul = $("#incidents");
       ul.innerHTML = "";
@@ -348,9 +365,7 @@
       const r = await fetch("/api/upload", { method: "POST", body: fd });
       const out = await r.json();
       if (!r.ok) { $("#upload-status").textContent = "Error: " + (out.error || r.status); return; }
-      $("#upload-status").textContent =
-        `Loaded ${out.zones_loaded} zones, ${out.incidents_loaded} incidents.` +
-        (out.errors?.length ? ` ${out.errors.length} row error(s).` : "");
+      renderUploadSummary(out);
       await loadSnapshot();
       await analyze();
     });

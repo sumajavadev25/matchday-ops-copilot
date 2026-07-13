@@ -178,9 +178,19 @@ async def upload(zones: UploadFile = File(...),
                 pass  # incidents are optional; a bad file just means none loaded
 
     _state["sim"] = new_sim(result.snapshot, time.monotonic())
+    snap = result.snapshot
+    total_capacity = sum(z.capacity for z in snap.zones)
+    total_occupancy = sum(z.occupancy for z in snap.zones)
+    incident_types: dict[str, int] = {}
+    for i in snap.incidents:
+        incident_types[i.type.value] = incident_types.get(i.type.value, 0) + 1
     return JSONResponse({
         "zones_loaded": result.zones_loaded,
-        "incidents_loaded": len(result.snapshot.incidents),
+        "incidents_loaded": len(snap.incidents),
+        "total_capacity": total_capacity,
+        "total_occupancy": total_occupancy,
+        "overall_density": round(total_occupancy / total_capacity, 3) if total_capacity else 0.0,
+        "incident_types": incident_types,
         "errors": result.errors,
     })
 
