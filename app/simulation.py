@@ -23,6 +23,17 @@ _MAX_STEP_SECONDS = 20.0
 # always has a live projection) instead of draining to empty and going quiet.
 _RELIEF_LEVEL = 0.55
 
+# Density bands used to pick each zone's opening fill rate (see _initial_rate).
+_BUSY_DENSITY = 0.75
+_MID_DENSITY = 0.5
+# Target time-to-fill per band, in seconds — calibrated so the risk spread
+# reads sensibly: near-full zones alarm in seconds, quiet zones stay calm.
+_BUSY_FILL_SECONDS = 200.0   # ~3 min
+_MID_FILL_SECONDS = 300.0    # ~5 min — predictive risk can escalate to HIGH
+_QUIET_FILL_SECONDS = 900.0  # ~15 min — stays NORMAL by projection
+# A zone always has *some* remaining headroom to fill, even near capacity.
+_MIN_REMAINING_FRACTION = 0.05
+
 
 def _initial_rate(zone: Zone) -> float:
     """Net inflow (persons/sec) calibrated so the *projection* spreads sensibly:
@@ -33,13 +44,14 @@ def _initial_rate(zone: Zone) -> float:
     Deterministic — the same snapshot always yields the same opening dynamics.
     """
     d = zone.density
-    remaining = max(zone.capacity - zone.occupancy, zone.capacity * 0.05)
-    if d >= 0.75:
-        target = 200.0        # busy: ~3 min to fill
-    elif d >= 0.5:
-        target = 300.0        # mid: ~5 min, predictive can escalate to HIGH
+    remaining = max(zone.capacity - zone.occupancy,
+                    zone.capacity * _MIN_REMAINING_FRACTION)
+    if d >= _BUSY_DENSITY:
+        target = _BUSY_FILL_SECONDS
+    elif d >= _MID_DENSITY:
+        target = _MID_FILL_SECONDS
     else:
-        target = 900.0        # quiet: ~15 min, stays NORMAL by projection
+        target = _QUIET_FILL_SECONDS
     return remaining / target
 
 

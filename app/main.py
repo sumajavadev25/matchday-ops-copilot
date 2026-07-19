@@ -74,6 +74,22 @@ def _advance_now() -> tuple[SimState, dict]:
     return sim, etas_for(sim)
 
 
+def _dataset_summary(snapshot) -> dict:
+    """Aggregate stats for the upload confirmation: total capacity/occupancy,
+    overall fill, and an incident-type breakdown."""
+    total_capacity = sum(z.capacity for z in snapshot.zones)
+    total_occupancy = sum(z.occupancy for z in snapshot.zones)
+    incident_types: dict[str, int] = {}
+    for incident in snapshot.incidents:
+        incident_types[incident.type.value] = incident_types.get(incident.type.value, 0) + 1
+    return {
+        "total_capacity": total_capacity,
+        "total_occupancy": total_occupancy,
+        "overall_density": round(total_occupancy / total_capacity, 3) if total_capacity else 0.0,
+        "incident_types": incident_types,
+    }
+
+
 @app.middleware("http")
 async def security_and_limits(request: Request, call_next):
     """Rate-limit the API per client, then add baseline hardening headers."""
@@ -178,20 +194,11 @@ async def upload(zones: UploadFile = File(...),
                 pass  # incidents are optional; a bad file just means none loaded
 
     _state["sim"] = new_sim(result.snapshot, time.monotonic())
-    snap = result.snapshot
-    total_capacity = sum(z.capacity for z in snap.zones)
-    total_occupancy = sum(z.occupancy for z in snap.zones)
-    incident_types: dict[str, int] = {}
-    for i in snap.incidents:
-        incident_types[i.type.value] = incident_types.get(i.type.value, 0) + 1
     return JSONResponse({
         "zones_loaded": result.zones_loaded,
-        "incidents_loaded": len(snap.incidents),
-        "total_capacity": total_capacity,
-        "total_occupancy": total_occupancy,
-        "overall_density": round(total_occupancy / total_capacity, 3) if total_capacity else 0.0,
-        "incident_types": incident_types,
+        "incidents_loaded": len(result.snapshot.incidents),
         "errors": result.errors,
+        **_dataset_summary(result.snapshot),
     })
 
 

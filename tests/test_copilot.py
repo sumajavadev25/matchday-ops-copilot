@@ -47,6 +47,38 @@ def test_zero_capacity_zone_with_people_is_critical():
     assert assess_zone(z(10, cap=0), [], T) == RiskLevel.CRITICAL
 
 
+def test_relief_order_sorts_least_crowded_first():
+    snap = StadiumSnapshot(zones=[z(900, id="a"), z(100, id="b"), z(500, id="c")])
+    order = copilot._relief_order(snap)
+    assert [zone.id for zone in order] == ["b", "c", "a"]
+
+
+def test_suggest_relief_zone_skips_itself():
+    snap = StadiumSnapshot(zones=[z(100, id="a"), z(200, id="b")])
+    order = copilot._relief_order(snap)  # a, b (a is least crowded)
+    # Asking for relief for the least-crowded zone itself must skip it and
+    # return the next best, not itself.
+    relief = copilot._suggest_relief_zone(snap.zones[0], order)
+    assert relief.id == "b"
+
+
+def test_suggest_relief_zone_single_zone_snapshot_returns_none():
+    snap = StadiumSnapshot(zones=[z(100, id="a")])
+    order = copilot._relief_order(snap)
+    assert copilot._suggest_relief_zone(snap.zones[0], order) is None
+
+
+def test_open_incidents_by_zone_groups_and_skips_resolved():
+    snap = StadiumSnapshot(zones=[z(100, id="a")], incidents=[
+        Incident(id="i1", type=IncidentType.MEDICAL, zone_id="a", severity=4),
+        Incident(id="i2", type=IncidentType.CROWD, zone_id="a", severity=2),
+        Incident(id="i3", type=IncidentType.SECURITY, zone_id="b", severity=3, resolved=True),
+    ])
+    grouped = copilot._open_incidents_by_zone(snap)
+    assert [i.id for i in grouped["a"]] == ["i1", "i2"]  # both open, same zone
+    assert "b" not in grouped                            # only incident there is resolved
+
+
 def test_eta_risk_thresholds():
     assert copilot._eta_risk(None) == RiskLevel.NORMAL
     assert copilot._eta_risk(30) == RiskLevel.CRITICAL

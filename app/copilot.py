@@ -15,7 +15,11 @@ GenAI is the intended production path and is required at evaluation time.
 from __future__ import annotations
 
 import json
+import random
+import time
 
+from google import genai
+from google.genai import errors, types
 from pydantic import BaseModel
 
 from .config import settings
@@ -58,8 +62,8 @@ class _GenRecommendation(BaseModel):
 def assess_zone(zone: Zone, incidents: list[Incident], threshold: float) -> RiskLevel:
     """Rule-based triage for a single zone. Deterministic and side-effect free."""
     density = zone.density
-    open_incidents = [i for i in incidents if i.zone_id == zone.id and not i.resolved]
-    max_sev = max((i.severity for i in open_incidents), default=0)
+    max_sev = max((i.severity for i in incidents
+                   if i.zone_id == zone.id and not i.resolved), default=0)
 
     # A high-severity incident escalates regardless of crowd level.
     if max_sev >= 4 or density >= 1.0:
@@ -111,15 +115,19 @@ def combined_risk(zone: Zone, incidents: list[Incident], threshold: float,
     return max(base, pred, key=lambda r: _RISK_ORDER[r])
 
 
-def _suggest_relief_zone(zone: Zone, snapshot: StadiumSnapshot) -> Zone | None:
-    """Least-crowded zone to redirect flow toward. O(zones), single pass."""
-    best: Zone | None = None
-    for candidate in snapshot.zones:
-        if candidate.id == zone.id:
-            continue
-        if best is None or candidate.density < best.density:
-            best = candidate
-    return best
+def _relief_order(snapshot: StadiumSnapshot) -> list[Zone]:
+    """All zones sorted least-to-most crowded. Computed once per report so
+    picking a relief zone for every flagged zone is O(1) lookup instead of an
+    O(zones) rescan each time — O(n log n) total instead of O(k·n)."""
+    return sorted(snapshot.zones, key=lambda z: z.density)
+
+
+def _suggest_relief_zone(zone: Zone, relief_order: list[Zone]) -> Zone | None:
+    """Least-crowded zone other than `zone` itself, from a precomputed order."""
+    for candidate in relief_order:
+        if candidate.id != zone.id:
+            return candidate
+    return None
 
 
 def zone_risks(snapshot: StadiumSnapshot,
@@ -138,13 +146,15 @@ def zone_risks(snapshot: StadiumSnapshot,
 def triage(snapshot: StadiumSnapshot, threshold: float,
            etas: dict[str, float | None] | None = None,
            ) -> list[tuple[Zone, RiskLevel]]:
-    """All zones needing attention (ELEVATED+), most severe first."""
-    order = {RiskLevel.CRITICAL: 0, RiskLevel.HIGH: 1, RiskLevel.ELEVATED: 2, RiskLevel.NORMAL: 3}
-    etas = etas or {}
-    scored = [(z, combined_risk(z, snapshot.incidents, threshold, etas.get(z.id)))
-              for z in snapshot.zones]
+    """All zones needing attention (ELEVATED+), most severe first.
+
+    Built on `zone_risks()` rather than recomputing `combined_risk` per zone,
+    so the two never drift and the work isn't done twice.
+    """
+    scored = zone_risks(snapshot, threshold, etas)
     flagged = [(z, r) for z, r in scored if r != RiskLevel.NORMAL]
-    flagged.sort(key=lambda pair: (order[pair[1]], -pair[0].density))
+    # _RISK_ORDER ascends NORMAL→CRITICAL; negate it to sort most-severe first.
+    flagged.sort(key=lambda pair: (-_RISK_ORDER[pair[1]], -pair[0].density))
     return flagged
 
 
@@ -170,14 +180,42 @@ def _fallback_recommendation(zone: Zone, risk: RiskLevel, relief: Zone | None) -
     )
 
 
+def _open_incidents_by_zone(snapshot: StadiumSnapshot) -> dict[str, list[Incident]]:
+    """Group unresolved incidents by zone id in a single pass, so callers don't
+    rescan the incident list once per zone."""
+    grouped: dict[str, list[Incident]] = {}
+    for incident in snapshot.incidents:
+        if not incident.resolved:
+            grouped.setdefault(incident.zone_id, []).append(incident)
+    return grouped
+
+
+def _assemble_recommendation(zone: Zone, risk: RiskLevel, relief: Zone | None,
+                             gen: dict | None) -> Recommendation:
+    """Build a Recommendation from Gemini output when present, else the
+    deterministic fallback. Keeps `build_report` focused on orchestration."""
+    if not gen:
+        return _fallback_recommendation(zone, risk, relief)
+    return Recommendation(
+        zone_id=zone.id,
+        zone_name=zone.name,
+        risk=risk,
+        density=round(zone.density, 3),
+        headline=gen.get("headline", f"{zone.name} needs attention"),
+        reasoning=gen.get("reasoning", ""),
+        action=gen.get("action", ""),
+        announcements={k: v for k, v in gen.get("announcements", {}).items() if v},
+    )
+
+
 def _build_prompt(items: list[tuple[Zone, RiskLevel, Zone | None]],
                   snapshot: StadiumSnapshot, langs: list[str],
                   etas: dict[str, float | None] | None = None) -> str:
     etas = etas or {}
+    open_by_zone = _open_incidents_by_zone(snapshot)
     payload = []
     for zone, risk, relief in items:
-        open_inc = [i.model_dump() for i in snapshot.incidents
-                    if i.zone_id == zone.id and not i.resolved]
+        open_inc = [i.model_dump() for i in open_by_zone.get(zone.id, ())]
         eta = etas.get(zone.id)
         payload.append({
             "zone_id": zone.id,
@@ -248,7 +286,7 @@ def _parse_model_json(raw: str) -> list[dict]:
     return json.loads(text[start:end + 1])
 
 
-def _rows_from_response(resp) -> dict[str, dict]:
+def _rows_from_response(resp: object) -> dict[str, dict]:
     """Normalise a model response into {zone_id: fields}, folding the
     announcements list back into a {lang: text} dict. Prefers the SDK's parsed
     structured output; falls back to lenient text parsing."""
@@ -272,7 +310,7 @@ def _rows_from_response(resp) -> dict[str, dict]:
     return out
 
 
-def _generate_with_failover(contents, config):
+def _generate_with_failover(contents: str, config: object | None):
     """Run a Gemini call across the model chain with our resilience policy.
 
     For each model (primary, then a lighter fallback): retry transient 5xx
@@ -280,12 +318,6 @@ def _generate_with_failover(contents, config):
     model, move straight to the next model. Shared by every LLM feature so the
     reliability engineering lives in exactly one place.
     """
-    import random
-    import time
-
-    from google import genai
-    from google.genai import errors
-
     client = genai.Client(api_key=settings.gemini_api_key)
     models = [settings.gemini_model]
     if settings.gemini_fallback_model and settings.gemini_fallback_model not in models:
@@ -312,8 +344,6 @@ def generate_reasoning(items: list[tuple[Zone, RiskLevel, Zone | None]],
                        langs: list[str],
                        etas: dict[str, float | None] | None = None) -> dict[str, dict]:
     """Call Gemini for explanations + announcements. Returns {zone_id: fields}."""
-    from google.genai import types
-
     prompt = _build_prompt(items, snapshot, langs, etas)
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -378,7 +408,8 @@ def build_report(snapshot: StadiumSnapshot,
     langs = langs or _DEFAULT_LANGS
 
     flagged = triage(snapshot, threshold, etas)
-    items = [(z, r, _suggest_relief_zone(z, snapshot)) for z, r in flagged]
+    relief_order = _relief_order(snapshot)
+    items = [(z, r, _suggest_relief_zone(z, relief_order)) for z, r in flagged]
 
     if not items:
         return CopilotReport(generated_by="none", threshold=threshold,
@@ -394,22 +425,8 @@ def build_report(snapshot: StadiumSnapshot,
             # Never let a model hiccup take down the control room.
             generated_by = "fallback"
 
-    recs: list[Recommendation] = []
-    for zone, risk, relief in items:
-        gen = reasoning_by_zone.get(zone.id)
-        if gen:
-            recs.append(Recommendation(
-                zone_id=zone.id,
-                zone_name=zone.name,
-                risk=risk,
-                density=round(zone.density, 3),
-                headline=gen.get("headline", f"{zone.name} needs attention"),
-                reasoning=gen.get("reasoning", ""),
-                action=gen.get("action", ""),
-                announcements={k: v for k, v in gen.get("announcements", {}).items() if v},
-            ))
-        else:
-            recs.append(_fallback_recommendation(zone, risk, relief))
+    recs = [_assemble_recommendation(zone, risk, relief, reasoning_by_zone.get(zone.id))
+            for zone, risk, relief in items]
 
     critical = sum(1 for _, r, _ in items if r == RiskLevel.CRITICAL)
     summary = (f"{len(items)} zone(s) flagged, {critical} critical. "
