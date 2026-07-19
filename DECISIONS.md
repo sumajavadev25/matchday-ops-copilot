@@ -118,3 +118,9 @@ would probe.
 - **Problem alignment:** one persona, two verticals, explainable output — exactly
   the "input → reasoning → action" loop the SME described.
 - **Real-data handling:** evaluator CSV upload path, per the Q&A.
+
+## Submission links (2026-07-19)
+
+- LinkedIn post: https://www.linkedin.com/posts/suma25_promptwars-buildwithai-gemini-ugcPost-7484545420875165696-fJUP/
+- GitHub repo (public): https://github.com/sumajavadev25/matchday-ops-copilot
+- Live app: https://matchday-ops-copilot.onrender.com
