@@ -138,3 +138,54 @@ def test_index_served():
     r = client.get("/")
     assert r.status_code == 200
     assert "Ops Copilot" in r.text
+
+
+def test_ask_rejects_overlong_question():
+    r = client.post("/api/ask", json={"question": "x" * 501})
+    assert r.status_code == 422  # exceeds MAX_QUESTION_CHARS
+
+
+def test_ask_accepts_max_length_question(monkeypatch):
+    from app import main as m
+    monkeypatch.setattr(m.settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(m, "answer_question", lambda q, snap, etas: "ok")
+    r = client.post("/api/ask", json={"question": "x" * 500})
+    assert r.status_code == 200
+
+
+def test_snapshot_zone_shape():
+    z0 = client.get("/api/snapshot").json()["zones"][0]
+    for key in ("id", "name", "capacity", "occupancy"):
+        assert key in z0
+
+
+def test_triage_zone_shape_has_projection_fields():
+    z0 = client.get("/api/triage").json()["zones"][0]
+    for key in ("zone_id", "density", "risk", "eta_seconds"):
+        assert key in z0
+
+
+def test_reset_restores_six_seed_zones():
+    # upload a small dataset, then reset must bring the demo back.
+    csv = "id,name,capacity,occupancy\nx,X,100,50\n"
+    client.post("/api/upload", files={"zones": ("z.csv", io.BytesIO(csv.encode()), "text/csv")})
+    assert len(client.get("/api/snapshot").json()["zones"]) == 1
+    assert client.post("/api/reset").json()["status"] == "reset"
+    assert len(client.get("/api/snapshot").json()["zones"]) == 6
+
+
+def test_upload_empty_incident_file_leaves_zones_intact():
+    csv = "id,name,capacity,occupancy\nx,X,1000,500\n"
+    files = {
+        "zones": ("z.csv", io.BytesIO(csv.encode()), "text/csv"),
+        "incidents": ("i.csv", io.BytesIO(b""), "text/csv"),
+    }
+    body = client.post("/api/upload", files=files).json()
+    assert body["zones_loaded"] == 1
+    assert body["incidents_loaded"] == 0
+
+
+def test_security_headers_include_csp():
+    h = client.get("/api/health").headers
+    assert "content-security-policy" in h
+    assert h["x-content-type-options"] == "nosniff"

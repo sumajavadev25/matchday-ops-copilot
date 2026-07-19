@@ -58,3 +58,40 @@ def test_etas_for_returns_entry_per_zone():
     ]), now=0)
     etas = etas_for(sim)
     assert set(etas) == {"a", "b"}
+
+
+def test_advance_is_additive_across_steps():
+    sim = new_sim(snap(500), now=0)
+    sim.rates["a"] = 5
+    advance(sim, now=4)   # +20 -> 520
+    advance(sim, now=8)   # +20 -> 540
+    assert sim.snapshot.zones[0].occupancy == 540
+
+
+def test_eta_shrinks_as_a_zone_fills():
+    sim = new_sim(snap(200, cap=1000), now=0)
+    sim.rates["a"] = 10
+    before = etas_for(sim)["a"]
+    advance(sim, now=10)  # +100
+    after = etas_for(sim)["a"]
+    assert after < before
+
+
+def test_rate_is_constant_until_a_bounce():
+    sim = new_sim(snap(300), now=0)
+    sim.rates["a"] = 7
+    advance(sim, now=5)
+    assert sim.rates["a"] == 7  # unchanged while still below capacity
+
+
+def test_quiet_zone_fills_slower_than_busy_zone():
+    quiet = new_sim(snap(100, cap=1000), now=0).rates["a"]   # 10% full
+    busy = new_sim(snap(900, cap=1000), now=0).rates["a"]    # 90% full
+    # A near-full zone is deliberately given a lower absolute inflow so its
+    # projection reads in seconds, not so fast everything alarms at once.
+    assert busy < quiet
+
+
+def test_new_sim_records_start_time():
+    sim = new_sim(snap(500), now=42.0)
+    assert sim.last_tick == 42.0

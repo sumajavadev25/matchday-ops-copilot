@@ -39,3 +39,45 @@ def test_incident_severity_bounds():
         Incident(id="i", type=IncidentType.MEDICAL, zone_id="z", severity=6)
     with pytest.raises(ValidationError):
         Incident(id="i", type=IncidentType.MEDICAL, zone_id="z", severity=0)
+
+
+def test_density_exactly_at_capacity_is_one():
+    assert Zone(id="z", name="Z", capacity=1000, occupancy=1000).density == 1.0
+
+
+def test_occupancy_implausibly_large_rejected():
+    with pytest.raises(ValidationError):
+        Zone(id="z", name="Z", capacity=1000, occupancy=2_000_000)
+
+
+def test_negative_capacity_rejected():
+    with pytest.raises(ValidationError):
+        Zone(id="z", name="Z", capacity=-1, occupancy=0)
+
+
+def test_incident_defaults_resolved_false_and_blank_description():
+    inc = Incident(id="i", type=IncidentType.CROWD, zone_id="z", severity=2)
+    assert inc.resolved is False
+    assert inc.description == ""
+
+
+def test_incident_type_accepts_all_enum_values():
+    for t in IncidentType:
+        inc = Incident(id="i", type=t, zone_id="z", severity=1)
+        assert inc.type == t
+
+
+def test_incident_rejects_unknown_type():
+    with pytest.raises(ValidationError):
+        Incident(id="i", type="earthquake", zone_id="z", severity=1)
+
+
+def test_snapshot_defaults_to_empty_lists():
+    from app.models import StadiumSnapshot
+    snap = StadiumSnapshot()
+    assert snap.zones == [] and snap.incidents == []
+
+
+def test_zone_missing_required_field_rejected():
+    with pytest.raises(ValidationError):
+        Zone(id="z", name="Z", capacity=1000)  # occupancy missing

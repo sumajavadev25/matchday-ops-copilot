@@ -300,3 +300,44 @@ def test_prompt_includes_few_shot_examples():
     prompt = copilot._build_prompt([(snap.zones[0], RiskLevel.CRITICAL, None)], snap, ["en"])
     assert "Examples of the expected voice" in prompt
     assert "never" in prompt.lower() and "emergency" in prompt.lower()
+
+
+def test_fallback_recommendation_is_self_explaining():
+    rec = copilot._fallback_recommendation(z(1000, cap=1000, id="gate-z"),
+                                           RiskLevel.CRITICAL, None)
+    assert "100%" in rec.headline
+    assert rec.reasoning and rec.action           # always explains + acts
+    assert rec.announcements.get("en")            # always has an English message
+    assert rec.risk == RiskLevel.CRITICAL
+
+
+def test_fallback_recommendation_mentions_relief_zone():
+    relief = z(100, cap=1000, id="gate-d")
+    relief.name = "Gate D"
+    rec = copilot._fallback_recommendation(z(1000, cap=1000, id="gate-c"),
+                                           RiskLevel.CRITICAL, relief)
+    assert "Gate D" in rec.action
+
+
+def test_state_briefing_includes_zones_and_incidents():
+    snap = StadiumSnapshot(
+        zones=[z(900, cap=1000, id="a")],
+        incidents=[Incident(id="i1", type=IncidentType.MEDICAL, zone_id="a", severity=4)],
+    )
+    briefing = copilot._state_briefing(snap, {"a": 40})
+    assert '"zones"' in briefing and '"incidents"' in briefing
+    assert "medical" in briefing
+
+
+def test_build_report_summary_counts_flagged_and_critical():
+    snap = StadiumSnapshot(zones=[z(1000, id="a"), z(850, id="b"), z(100, id="c")])
+    rep = build_report(snap, threshold=T)  # genai disabled in tests -> fallback
+    assert "2 zone(s) flagged" in rep.summary   # a critical, b high; c normal
+    assert "1 critical" in rep.summary
+
+
+def test_build_report_empty_when_all_normal():
+    snap = StadiumSnapshot(zones=[z(100, id="a"), z(200, id="b")])
+    rep = build_report(snap, threshold=T)
+    assert rep.recommendations == []
+    assert "nominal" in rep.summary.lower()

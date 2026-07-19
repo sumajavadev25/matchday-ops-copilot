@@ -52,7 +52,7 @@ def _norm_header(fieldnames: list[str] | None) -> set[str]:
 def parse_zones_csv(text: str) -> IngestResult:
     """Parse a zones CSV. Expected columns: id,name,capacity,occupancy[,lat,lng]."""
     result = IngestResult(snapshot=StadiumSnapshot())
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     header = _norm_header(reader.fieldnames)
     missing = _ZONE_REQUIRED - header
     if missing:
@@ -83,7 +83,7 @@ def parse_incidents_csv(text: str) -> list[Incident]:
     """Parse an optional incidents CSV. Bad rows are skipped silently here;
     callers that need error detail should use the zones path as the template."""
     incidents: list[Incident] = []
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     if _INCIDENT_REQUIRED - _norm_header(reader.fieldnames):
         return incidents
     for row in reader:
