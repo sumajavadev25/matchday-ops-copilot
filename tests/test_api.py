@@ -189,3 +189,20 @@ def test_security_headers_include_csp():
     h = client.get("/api/health").headers
     assert "content-security-policy" in h
     assert h["x-content-type-options"] == "nosniff"
+
+
+def test_upload_oversized_zones_rejected(monkeypatch):
+    import app.main as m
+    monkeypatch.setattr(m, "MAX_UPLOAD_BYTES", 10)  # tiny cap for the test
+    big = b"id,name,capacity,occupancy\n" + b"g,Gate,1000,500\n" * 5
+    r = client.post("/api/upload", files={"zones": ("z.csv", io.BytesIO(big), "text/csv")})
+    assert r.status_code == 413
+
+
+def test_dataset_summary_handles_zero_capacity():
+    from app.main import _dataset_summary
+    from app.models import StadiumSnapshot, Zone
+    snap = StadiumSnapshot(zones=[Zone(id="z", name="Z", capacity=0, occupancy=0)])
+    summary = _dataset_summary(snap)
+    assert summary["total_capacity"] == 0
+    assert summary["overall_density"] == 0.0  # no divide-by-zero

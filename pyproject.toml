@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "matchday-ops-copilot"
+version = "0.3.0"
+description = "Explainable, real-time decision support for a FIFA World Cup 2026 stadium control room."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Suma" }]
+keywords = ["fastapi", "gemini", "genai", "stadium-operations", "decision-support"]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "python-multipart",
+    "python-dotenv",
+    "google-genai",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "httpx", "pyflakes", "pycodestyle"]
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["app"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

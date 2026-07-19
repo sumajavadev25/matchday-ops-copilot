@@ -15,6 +15,7 @@ every poll; the (costlier) LLM reasoning runs only on demand via /api/analyze.
 """
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
@@ -26,7 +27,10 @@ from pydantic import BaseModel, Field
 from .config import settings
 from .copilot import answer_question, build_report, zone_risks
 from .data import parse_incidents_csv, parse_zones_csv, seed_snapshot
+from .models import StadiumSnapshot
 from .simulation import SimState, advance, etas_for, new_sim
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="MatchDay Ops Copilot", version="0.3.0")
 
@@ -74,7 +78,7 @@ def _advance_now() -> tuple[SimState, dict]:
     return sim, etas_for(sim)
 
 
-def _dataset_summary(snapshot) -> dict:
+def _dataset_summary(snapshot: StadiumSnapshot) -> dict:
     """Aggregate stats for the upload confirmation: total capacity/occupancy,
     overall fill, and an incident-type breakdown."""
     total_capacity = sum(z.capacity for z in snapshot.zones)
@@ -162,6 +166,7 @@ def ask(req: AskRequest) -> JSONResponse:
         answer = answer_question(req.question, sim.snapshot, etas)
         return JSONResponse({"answer": answer, "generated_by": "gemini"})
     except Exception:
+        logger.warning("Copilot ask failed", exc_info=True)
         return JSONResponse(
             {"answer": "The copilot is briefly unavailable — please retry.",
              "generated_by": "unavailable"}, status_code=503)

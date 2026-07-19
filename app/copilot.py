@@ -15,6 +15,7 @@ GenAI is the intended production path and is required at evaluation time.
 from __future__ import annotations
 
 import json
+import logging
 import random
 import time
 
@@ -23,6 +24,8 @@ from google.genai import errors, types
 from pydantic import BaseModel
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 from .models import (
     CopilotReport,
     Incident,
@@ -310,7 +313,7 @@ def _rows_from_response(resp: object) -> dict[str, dict]:
     return out
 
 
-def _generate_with_failover(contents: str, config: object | None):
+def _generate_with_failover(contents: str, config: "types.GenerateContentConfig | None"):
     """Run a Gemini call across the model chain with our resilience policy.
 
     For each model (primary, then a lighter fallback): retry transient 5xx
@@ -422,7 +425,9 @@ def build_report(snapshot: StadiumSnapshot,
             reasoning_by_zone = generate_reasoning(items, snapshot, langs, etas)
             generated_by = "gemini"
         except Exception:
-            # Never let a model hiccup take down the control room.
+            # Never let a model hiccup take down the control room — degrade to the
+            # deterministic fallback, but record why so failures aren't silent.
+            logger.warning("Gemini reasoning failed; using fallback", exc_info=True)
             generated_by = "fallback"
 
     recs = [_assemble_recommendation(zone, risk, relief, reasoning_by_zone.get(zone.id))
